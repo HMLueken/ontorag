@@ -508,23 +508,39 @@ def cmd_mcp_server(
     onto: Optional[str] = typer.Option(None, help="Ontology TTL path (local mode)"),
     inst: Optional[str] = typer.Option(None, help="Instances TTL path (local mode)"),
     sparql_endpoint: Optional[str] = typer.Option(None, help="Remote SPARQL endpoint (Blazegraph/QLever)"),
+    neo4j: bool = typer.Option(False, "--neo4j", help="Serve from a Neo4j projection (see load-neo4j)"),
+    uri: Optional[str] = typer.Option(None, help="Neo4j bolt URI (default: env NEO4J_URI)"),
+    user: Optional[str] = typer.Option(None, help="Neo4j username (default: env NEO4J_USER)"),
+    password: Optional[str] = typer.Option(None, help="Neo4j password (default: env NEO4J_PASSWORD)"),
+    database: Optional[str] = typer.Option(None, help="Neo4j database (default: env NEO4J_DATABASE)"),
     host: str = typer.Option("0.0.0.0", help="Bind host"),
     port: int = typer.Option(9010, help="Bind port"),
 ):
     """
     Start an MCP server backed by either:
-      - local TTL (rdflib in-memory), or
-      - a remote SPARQL endpoint (Blazegraph/QLever).
+      - local TTL (rdflib in-memory),
+      - a remote SPARQL endpoint (Blazegraph/QLever), or
+      - a Neo4j projection (--neo4j; needs the optional neo4j extra).
+
+    The four navigation tools (describe, list_by_class, outgoing, incoming) are the
+    same whichever backend is used. RDF backends additionally expose sparql_select /
+    sparql_construct; Neo4j exposes cypher_query instead, since it is an LPG and does
+    not answer SPARQL.
     """
     from ontorag.mcp_backend import LocalRdfBackend, RemoteSparqlBackend
     from ontorag.mcp_server import create_mcp_app
 
-    if sparql_endpoint:
+    if neo4j:
+        from ontorag.neo4j_store import Neo4jBackend
+        _log.info("MCP server: neo4j backend")
+        backend = Neo4jBackend(uri=uri, user=user, password=password, database=database)
+    elif sparql_endpoint:
         _log.info("MCP server: remote backend at %s", sparql_endpoint)
         backend = RemoteSparqlBackend(sparql_endpoint)
     else:
         if not onto or not inst:
-            raise typer.BadParameter("Provide --sparql-endpoint OR both --onto and --inst")
+            raise typer.BadParameter(
+                "Provide --neo4j, OR --sparql-endpoint, OR both --onto and --inst")
         _log.info("MCP server: local backend onto=%s inst=%s", onto, inst)
         backend = LocalRdfBackend(onto, inst)
 

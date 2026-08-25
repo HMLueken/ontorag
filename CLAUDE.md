@@ -47,7 +47,7 @@ Verbosity flags go before the subcommand: `uv run ontorag -v <command>` or `-vv`
 | `ontorag extract-instances --chunks ... --schema-card ... --out-ttl ...` | LLM instance extraction → RDF TTL with PROV provenance |
 | `ontorag load-neo4j --file ontology/world.ttl [--dry-run]` | Project an instances TTL into Neo4j as a native property graph (idempotent; needs `[neo4j]`) |
 | `ontorag sparql-server --onto ... --inst ...` | FastAPI in-memory SPARQL endpoint (port 8890) |
-| `ontorag mcp-server --onto ... --inst ...` | Knowledge graph MCP server (port 9010) |
+| `ontorag mcp-server --onto ... --inst ...` | Knowledge graph MCP server (port 9010); also `--sparql-endpoint <url>` or `--neo4j` |
 | `ontorag ontology-mcp --catalog ...` | Ontology catalog MCP server (port 9020) |
 | `ontorag register-ontology <slug> <ttl>` | Register a baseline OWL/TTL into the catalog |
 | `ontorag init-schema-card --baselines foaf,prov --out ...` | Compose baselines → initial schema card |
@@ -88,10 +88,10 @@ Documents
 | `proposal_to_ttl.py` | Schema proposal/alignment JSON → rdflib `Graph` (OWL/RDFS) |
 | `instances_to_ttl.py` | Instance proposals → rdflib `Graph` with PROV mention nodes |
 | `blazegraph.py` | Blazegraph REST API (upload TTL, SPARQL UPDATE) |
-| `neo4j_store.py` | Neo4j sink: RDF -> labelled property graph. `graph_to_rows()` is a pure, driver-free mapping (offline-testable); `load_rows()` does batched MERGE I/O. Neo4j is a **parallel serving target, not a `SparqlBackend`** — it is an LPG and does not answer SPARQL |
+| `neo4j_store.py` | Neo4j sink: RDF -> labelled property graph. `graph_to_rows()` is a pure, driver-free mapping (offline-testable); `load_rows()` does batched MERGE I/O; `Neo4jBackend` serves the MCP tools in Cypher (read transactions, so writes are refused by the server). Neo4j is a **parallel serving target, not a `SparqlBackend`** — it is an LPG and does not answer SPARQL. The projection stores `propertyIris` on nodes and mentions so predicate IRIs survive the round trip |
 | `sparql_server.py` | FastAPI SPARQL endpoint (SELECT/ASK/CONSTRUCT/DESCRIBE, content negotiation) |
-| `mcp_backend.py` | `SparqlBackend` ABC + `LocalRdfBackend` + `RemoteSparqlBackend` |
-| `mcp_server.py` | Knowledge graph MCP tools (`sparql_select`, `describe`, `list_by_class`, etc.) |
+| `mcp_backend.py` | `GraphBackend` ABC (`describe`/`list_by_class`/`outgoing`/`incoming`) + `SparqlBackend` (adds `select`/`construct`, and implements the four in SPARQL) + `LocalRdfBackend` + `RemoteSparqlBackend`. All navigation returns SPARQL Results JSON, whatever the store |
+| `mcp_server.py` | Knowledge graph MCP tools. Thin: the four navigation tools delegate to the backend; query-language tools are registered by capability — `sparql_select`/`sparql_construct` for `SparqlBackend`, `cypher_query` for Neo4j — so a client never sees a tool that must fail |
 | `mcp_client.py` | Async SSE client for remote MCP |
 | `ontology_catalog.py` | Local catalog + OWL/TTL → schema card converter; remote baseline fetch |
 | `ontology_mcp.py` | Ontology catalog MCP server |

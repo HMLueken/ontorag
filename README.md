@@ -497,7 +497,21 @@ ontorag mcp-server \
 # Remote SPARQL backend
 ontorag mcp-server \
   --sparql-endpoint http://localhost:9999/blazegraph/namespace/ontorag/sparql
+
+# Neo4j backend (after `load-neo4j`)
+ontorag mcp-server --neo4j --uri bolt://localhost:7687 --user neo4j --password ******
 ```
+
+The four navigation tools -- `describe`, `list_by_class`, `outgoing`, `incoming` --
+are identical whichever backend is serving, and all return SPARQL Results JSON. The
+query-language tool follows the store: RDF backends expose `sparql_select` /
+`sparql_construct`, Neo4j exposes `cypher_query` instead, so a client is never
+offered a tool that has to fail. Cypher runs in a read transaction, so the server
+itself rejects writes.
+
+`describe` against Neo4j rebuilds RDF from the projection, and the provenance walk
+survives the round trip intact -- predicates come back as `prov:wasDerivedFrom` /
+`prov:value` / `mcp:chunkId`, not as invented IRIs.
 
 ---
 
@@ -652,7 +666,7 @@ ontorag/
   blazegraph.py                     # Blazegraph REST API integration
   neo4j_store.py                    # Neo4j sink: RDF -> labelled property graph
   sparql_server.py                  # FastAPI in-memory SPARQL endpoint
-  mcp_backend.py                    # SparqlBackend ABC + Local/Remote impls
+  mcp_backend.py                    # GraphBackend ABC + SparqlBackend + Local/Remote
   mcp_server.py                     # Knowledge graph MCP server
   mcp_client.py                     # Async SSE client for remote MCP
   ontology_catalog.py               # Baseline catalog + OWL/TTL converter

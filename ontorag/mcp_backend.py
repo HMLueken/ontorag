@@ -1,10 +1,24 @@
 # ontorag/mcp_backend.py
+"""Backends behind the knowledge-graph MCP tools.
+
+Two layers:
+
+* `GraphBackend` — the store-agnostic navigation the MCP tools actually need
+  (`describe`, `list_by_class`, `outgoing`, `incoming`). Any store can implement it.
+* `SparqlBackend` — a `GraphBackend` that also answers raw SPARQL. The navigation
+  methods have a default SPARQL implementation here, so an RDF store only has to
+  provide `select()` and `construct()`.
+
+`Neo4jBackend` (in `neo4j_store.py`) implements `GraphBackend` directly in Cypher,
+because Neo4j is an LPG and does not answer SPARQL. Both return **SPARQL Results
+JSON** from the navigation methods, so the MCP tool contract is identical whichever
+store is behind it.
+"""
 from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Sequence
 
 import requests
 from rdflib import Graph
@@ -14,9 +28,52 @@ from ontorag.verbosity import get_logger
 
 _log = get_logger("ontorag.mcp_backend")
 
+RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 
-class SparqlBackend(ABC):
-    """Abstract backend exposing select() and construct() over a SPARQL store."""
+
+# ── SPARQL Results JSON helpers (the shared wire format) ─────────────
+
+def term(value: Any, kind: str = "literal") -> Optional[Dict[str, str]]:
+    """One SPARQL Results JSON binding cell. None drops the cell (unbound)."""
+    if value is None:
+        return None
+    return {"type": kind, "value": str(value)}
+
+
+def results_json(variables: Sequence[str], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Assemble SPARQL Results JSON from rows of {var: cell-or-None}."""
+    return {
+        "head": {"vars": list(variables)},
+        "results": {"bindings": [{k: v for k, v in row.items() if v is not None}
+                                 for row in rows]},
+    }
+
+
+# ── interfaces ───────────────────────────────────────────────────────
+
+class GraphBackend(ABC):
+    """Store-agnostic graph navigation used by the MCP tools."""
+
+    @abstractmethod
+    def describe(self, iri: str, accept: str = "text/turtle") -> str:
+        """Return the resource and its immediate surroundings as serialised RDF."""
+
+    @abstractmethod
+    def list_by_class(self, class_iri: str, limit: int = 50) -> Dict[str, Any]:
+        """Instances of a class, as SPARQL Results JSON (?s ?label)."""
+
+    @abstractmethod
+    def outgoing(self, iri: str, limit: int = 100) -> Dict[str, Any]:
+        """Outgoing edges/attributes, as SPARQL Results JSON (?p ?o)."""
+
+    @abstractmethod
+    def incoming(self, iri: str, limit: int = 100) -> Dict[str, Any]:
+        """Incoming edges, as SPARQL Results JSON (?s ?p)."""
+
+
+class SparqlBackend(GraphBackend):
+    """A GraphBackend over a SPARQL store: implement select() + construct() and the
+    navigation methods come for free."""
 
     @abstractmethod
     def select(self, query: str) -> Dict[str, Any]:
@@ -26,6 +83,27 @@ class SparqlBackend(ABC):
     def construct(self, query: str, accept: str = "text/turtle") -> str:
         """Run a CONSTRUCT/DESCRIBE query, return serialised RDF as text."""
 
+    # -- navigation, in SPARQL (previously inlined in mcp_server.py) --
+
+    def describe(self, iri: str, accept: str = "text/turtle") -> str:
+        return self.construct(f"DESCRIBE <{iri}>", accept=accept)
+
+    def list_by_class(self, class_iri: str, limit: int = 50) -> Dict[str, Any]:
+        return self.select(
+            f"SELECT ?s ?label WHERE {{\n"
+            f"  ?s a <{class_iri}> .\n"
+            f"  OPTIONAL {{ ?s <{RDFS_LABEL}> ?label }}\n"
+            f"}} LIMIT {int(limit)}"
+        )
+
+    def outgoing(self, iri: str, limit: int = 100) -> Dict[str, Any]:
+        return self.select(f"SELECT ?p ?o WHERE {{ <{iri}> ?p ?o }} LIMIT {int(limit)}")
+
+    def incoming(self, iri: str, limit: int = 100) -> Dict[str, Any]:
+        return self.select(f"SELECT ?s ?p WHERE {{ ?s ?p <{iri}> }} LIMIT {int(limit)}")
+
+
+# ── RDF implementations ──────────────────────────────────────────────
 
 class LocalRdfBackend(SparqlBackend):
     """In-memory rdflib backend loaded from local TTL files."""

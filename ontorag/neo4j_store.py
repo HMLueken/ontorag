@@ -36,11 +36,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.namespace import RDF, RDFS
 
+from ontorag.mcp_backend import GraphBackend, results_json, term
 from ontorag.verbosity import get_logger
 
 _log = get_logger("ontorag.neo4j_store")
 
 BATCH = 1000
+PROV_VALUE = "http://www.w3.org/ns/prov#value"
 
 # Subjects typed with one of these are schema, not data — skip them, so pointing
 # this at a concatenated schema+world TTL still yields only instances.
@@ -144,6 +146,9 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
             "classes": sorted({safe_label(local_name(t)) for t in class_iris}),
             "class_iris": sorted(class_iris),
             "props": {},
+            # property keys are local names; keep the real predicate IRIs so a
+            # reader can reconstruct faithful RDF instead of inventing one
+            "prop_iris": [],
         }
 
         for p, o in g.predicate_objects(subj):
@@ -151,8 +156,12 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
                 continue
             name = local_name(p)
             if o in mention_ids:                                  # provenance
-                m = {local_name(mp): _py(mo) for mp, mo in g.predicate_objects(o)
-                     if mp != RDF.type}
+                m, m_iris = {}, []
+                for mp, mo in g.predicate_objects(o):
+                    if mp == RDF.type:
+                        continue
+                    m[local_name(mp)] = _py(mo)
+                    m_iris.append(str(mp))
                 quote = m.pop("value", "")                        # prov:value
                 chunk_id = str(m.get("chunkId", ""))
                 if not quote:
@@ -160,7 +169,9 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
                 mentions.append({
                     "key": mention_key(iri, chunk_id, str(quote)),
                     "iri": iri,
-                    "props": {"quote": quote, **m},
+                    "pred": str(p),          # prov:wasDerivedFrom — kept so the
+                    # quote keeps prov:value's IRI so describe() can rebuild it
+                    "props": {"quote": quote, **m, "propertyIris": sorted(set(m_iris))},
                 })
             elif isinstance(o, URIRef):                           # object property
                 rels.append({"from": iri, "to": str(o),
@@ -169,6 +180,8 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
                 node["label"] = _py(o)
             else:                                                 # datatype property
                 _add_prop(node["props"], name, _py(o))
+                if str(p) not in node["prop_iris"]:
+                    node["prop_iris"].append(str(p))
 
         nodes[iri] = node
 
@@ -184,6 +197,8 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
             kept.append(r)
         elif r["from"] in known:
             _add_prop(nodes[r["from"]]["props"], local_name(r["iri"]), r["to"])
+            if r["iri"] not in nodes[r["from"]]["prop_iris"]:
+                nodes[r["from"]]["prop_iris"].append(r["iri"])
             external += 1
     if external:
         _log.info("neo4j: %d object propert%s pointed outside the graph and became "
@@ -244,7 +259,8 @@ def load_rows(rows: Dict[str, List[dict]], *, uri: Optional[str] = None,
                 extra = "".join(f":`{l}`" for l in labels)
                 q = (f"UNWIND $rows AS row "
                      f"MERGE (n:Resource{extra} {{iri: row.iri}}) "
-                     f"SET n += row.props, n.label = row.label, n.classIris = row.class_iris")
+                     f"SET n += row.props, n.label = row.label, "
+                     f"n.classIris = row.class_iris, n.propertyIris = row.prop_iris")
                 for chunk in _batches(group, batch):
                     ses.run(q, rows=chunk)
                     counts["nodes"] += len(chunk)
@@ -265,7 +281,7 @@ def load_rows(rows: Dict[str, List[dict]], *, uri: Optional[str] = None,
             q = ("UNWIND $rows AS row "
                  "MATCH (n:Resource {iri: row.iri}) "
                  "MERGE (m:Mention {key: row.key}) SET m += row.props "
-                 "MERGE (n)-[:DERIVED_FROM]->(m)")
+                 "MERGE (n)-[d:DERIVED_FROM]->(m) SET d.iri = row.pred")
             for chunk in _batches(rows["mentions"], batch):
                 ses.run(q, rows=chunk)
                 counts["mentions"] += len(chunk)
@@ -285,3 +301,162 @@ def neo4j_upload_ttl(ttl_path: str, *, uri: Optional[str] = None,
     _log.info("neo4j: parsed %s (%d triples)", ttl_path, len(g))
     return load_rows(graph_to_rows(g), uri=uri, user=user, password=password,
                      database=database, wipe=wipe, batch=batch)
+
+
+# ── MCP backend (Cypher) ─────────────────────────────────────────────
+
+# Structural properties written by load_rows(); not part of the data.
+_RESERVED = {"iri", "label", "classIris", "propertyIris"}
+
+
+class Neo4jBackend(GraphBackend):
+    """`GraphBackend` over a Neo4j projection, in Cypher.
+
+    Neo4j does not answer SPARQL, so this deliberately does **not** subclass
+    `SparqlBackend` — the MCP server drops `sparql_select`/`sparql_construct` and
+    offers `cypher_query` instead. The navigation methods still return SPARQL
+    Results JSON, so the rest of the tool contract is unchanged.
+
+    Queries run in read transactions (`execute_read`), so the server itself rejects
+    writes — a real guarantee rather than a regex over the query text.
+
+    One honest divergence from the RDF backends: the projection stores datatype
+    properties as node properties keyed by local name, so predicate IRIs are
+    recovered from `propertyIris` where possible. Where a property has no recorded
+    IRI, `outgoing()` reports the bare local name rather than inventing one.
+    """
+
+    def __init__(self, uri: Optional[str] = None, user: Optional[str] = None,
+                 password: Optional[str] = None, database: Optional[str] = None) -> None:
+        self._driver = _driver(uri, user, password)
+        self._database = database or os.getenv("NEO4J_DATABASE") or None
+        _log.info("Neo4jBackend: database=%s", self._database or "<default>")
+
+    def close(self) -> None:
+        self._driver.close()
+
+    def _read(self, cypher: str, **params) -> List[dict]:
+        with self._driver.session(database=self._database) as ses:
+            return ses.execute_read(
+                lambda tx: [r.data() for r in tx.run(cypher, **params)])
+
+    # -- raw escape hatch, exposed as the `cypher_query` MCP tool --
+
+    def cypher(self, query: str, limit: int = 200) -> Dict[str, Any]:
+        """Run a read-only Cypher query; rows come back as SPARQL Results JSON."""
+        rows = self._read(query)[:limit]
+        variables: List[str] = []
+        for r in rows:
+            for k in r:
+                if k not in variables:
+                    variables.append(k)
+        return results_json(variables, [
+            {k: term(r.get(k), "uri" if _looks_iri(r.get(k)) else "literal")
+             for k in variables} for r in rows])
+
+    # -- GraphBackend --
+
+    def list_by_class(self, class_iri: str, limit: int = 50) -> Dict[str, Any]:
+        rows = self._read(
+            "MATCH (n:Resource) WHERE $cls IN n.classIris "
+            "RETURN n.iri AS s, n.label AS label LIMIT $limit",
+            cls=class_iri, limit=int(limit))
+        return results_json(["s", "label"], [
+            {"s": term(r["s"], "uri"), "label": term(r["label"])} for r in rows])
+
+    def outgoing(self, iri: str, limit: int = 100) -> Dict[str, Any]:
+        node = self._read("MATCH (n:Resource {iri: $iri}) "
+                          "RETURN properties(n) AS props, n.classIris AS classes",
+                          iri=iri)
+        rows: List[Dict[str, Any]] = []
+        if node:
+            props = node[0]["props"] or {}
+            by_local = {local_name(i): i for i in (props.get("propertyIris") or [])}
+            for cls in node[0]["classes"] or []:
+                rows.append({"p": term(str(RDF.type), "uri"), "o": term(cls, "uri")})
+            if props.get("label"):
+                rows.append({"p": term(str(RDFS.label), "uri"),
+                             "o": term(props["label"])})
+            for key, value in props.items():
+                if key in _RESERVED:
+                    continue
+                pred = by_local.get(key, key)          # bare local name if unrecorded
+                for v in (value if isinstance(value, list) else [value]):
+                    rows.append({"p": term(pred, "uri" if _looks_iri(pred) else "literal"),
+                                 "o": term(v, "uri" if _looks_iri(v) else "literal")})
+
+        for r in self._read(
+                "MATCH (a:Resource {iri: $iri})-[rel]->(b) "
+                "RETURN coalesce(rel.iri, type(rel)) AS p, b.iri AS o, b.key AS mkey, "
+                "b.quote AS quote LIMIT $limit", iri=iri, limit=int(limit)):
+            target = r["o"] or r["mkey"]               # mentions have a key, not an iri
+            rows.append({"p": term(r["p"], "uri" if _looks_iri(r["p"]) else "literal"),
+                         "o": term(target, "uri" if _looks_iri(target) else "literal")})
+        return results_json(["p", "o"], rows[:int(limit)])
+
+    def incoming(self, iri: str, limit: int = 100) -> Dict[str, Any]:
+        rows = self._read(
+            "MATCH (a:Resource)-[rel]->(b:Resource {iri: $iri}) "
+            "RETURN a.iri AS s, coalesce(rel.iri, type(rel)) AS p LIMIT $limit",
+            iri=iri, limit=int(limit))
+        return results_json(["s", "p"], [
+            {"s": term(r["s"], "uri"),
+             "p": term(r["p"], "uri" if _looks_iri(r["p"]) else "literal")}
+            for r in rows])
+
+    def describe(self, iri: str, accept: str = "text/turtle") -> str:
+        """Rebuild the node's neighbourhood as RDF and serialise it, so `describe`
+        returns the same media types as the RDF backends."""
+        g = Graph()
+        s = URIRef(iri)
+        node = self._read("MATCH (n:Resource {iri: $iri}) "
+                          "RETURN properties(n) AS props, n.classIris AS classes",
+                          iri=iri)
+        if not node:
+            return g.serialize(format=_RDF_FORMATS.get(accept, "turtle"))
+
+        props = node[0]["props"] or {}
+        by_local = {local_name(i): i for i in (props.get("propertyIris") or [])}
+        for cls in node[0]["classes"] or []:
+            g.add((s, RDF.type, URIRef(cls)))
+        if props.get("label"):
+            g.add((s, RDFS.label, Literal(props["label"])))
+        for key, value in props.items():
+            if key in _RESERVED or key not in by_local:
+                continue                               # no IRI recorded -> not valid RDF
+            p = URIRef(by_local[key])
+            for v in (value if isinstance(value, list) else [value]):
+                g.add((s, p, URIRef(v) if _looks_iri(v) else Literal(v)))
+
+        for r in self._read(
+                "MATCH (a:Resource {iri: $iri})-[rel]->(b) "
+                "RETURN coalesce(rel.iri, type(rel)) AS p, b.iri AS o, "
+                "properties(b) AS bprops", iri=iri):
+            if not _looks_iri(r["p"]):
+                continue
+            p = URIRef(r["p"])
+            if r["o"]:
+                g.add((s, p, URIRef(r["o"])))
+            else:                                      # a Mention: inline its payload
+                mn = BNode()
+                g.add((s, p, mn))
+                bprops = r["bprops"] or {}
+                mby = {local_name(i): i for i in (bprops.get("propertyIris") or [])}
+                mby.setdefault("quote", str(PROV_VALUE))   # stored under prov:value
+                for k, v in bprops.items():
+                    if k in ("key", "propertyIris") or k not in mby:
+                        continue
+                    g.add((mn, URIRef(mby[k]), Literal(v)))
+        return g.serialize(format=_RDF_FORMATS.get(accept, "turtle"))
+
+
+_RDF_FORMATS = {
+    "text/turtle": "turtle",
+    "application/ld+json": "json-ld",
+    "application/rdf+xml": "xml",
+    "application/n-triples": "nt",
+}
+
+
+def _looks_iri(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", value))

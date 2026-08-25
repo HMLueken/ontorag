@@ -86,8 +86,10 @@ def test_mention_carries_the_citation_payload(rows):
     assert m["sourcePath"] == "amol://core.pdf"
     assert m["page"] == 12                      # xsd:integer survives as an int
     assert m["section"] == "Magi"
-    # attached to the instance it was derived from
+    # attached to the instance it was derived from, via a real predicate IRI so
+    # outgoing()/describe() report prov:wasDerivedFrom rather than "DERIVED_FROM"
     assert rows["mentions"][0]["iri"].startswith("http://amol/Magus/")
+    assert rows["mentions"][0]["pred"] == "http://www.w3.org/ns/prov#wasDerivedFrom"
 
 
 def test_reimport_is_idempotent(rows):
