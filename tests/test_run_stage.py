@@ -74,3 +74,20 @@ def test_frozen_build_reinvokes_itself(monkeypatch):
     monkeypatch.setattr(run_stage.sys, "frozen", True, raising=False)
     monkeypatch.setattr(run_stage.sys, "executable", "/Apps/OntoRAG.app/ontorag", raising=False)
     assert run_stage._self_cmd() == ["/Apps/OntoRAG.app/ontorag"]
+
+
+def test_failing_step_reports_which_one(tmp_path, monkeypatch):
+    """A dead endpoint or bad key is ordinary; it must not surface as a traceback."""
+    import subprocess as sp
+    m = _setup(tmp_path)
+
+    def boom(cmd, **kw):
+        raise sp.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(run_stage.subprocess, "run", boom)
+    monkeypatch.setattr(run_stage, "_self_cmd", lambda: ["ontorag"])
+    with pytest.raises(SystemExit) as e:
+        run_stage.propose(tmp_path, m)
+    msg = str(e.value)
+    assert "stage failed at" in msg and "exit 1" in msg, msg
+    assert "Traceback" not in msg

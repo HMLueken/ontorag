@@ -61,7 +61,18 @@ def _safe_prefix(slug: str) -> str:
 def _run(root: pathlib.Path, *args: str) -> None:
     cmd = [*_self_cmd(), *args]
     print("+ " + " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, cwd=root)
+    try:
+        subprocess.run(cmd, check=True, cwd=root)
+    except subprocess.CalledProcessError as e:
+        # A sub-step failing is an ordinary outcome -- an unreachable endpoint, a
+        # bad key, a model the server does not serve. Surfacing it as a traceback
+        # is useless in an Actions log and worse in a desktop UI, so report which
+        # step failed and stop.
+        step = next((a for a in args if not a.startswith("-")), "step")
+        raise SystemExit(
+            f"stage failed at `{step}` (exit {e.returncode}). "
+            f"Check the LLM endpoint and key for this dataset, then re-run."
+        ) from None
 
 
 def _engine(root: pathlib.Path, *args: str, llm: bool = False, m: dict) -> None:
