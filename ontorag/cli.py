@@ -386,6 +386,24 @@ def cmd_load_ttl(
     typer.echo(f"OK load-ttl: file={file} graph={graph}")
 
 
+@app.command("run-stage")
+def cmd_run_stage(
+    stage: str = typer.Argument(..., help="Pipeline stage: propose | extract"),
+    root: Optional[str] = typer.Option(None, "--root", help="Dataset directory (default: cwd)"),
+):
+    """
+    Run one governed pipeline stage over a dataset directory.
+
+    This is the stage composition the Hub's Actions workflow and the desktop client
+    both drive, so there is exactly one definition of what `propose` and `extract`
+    mean. A frozen single-file build re-invokes itself, so a packaged app can run a
+    stage with no Python installed.
+    """
+    from ontorag.run_stage import run
+
+    run(stage, root)
+
+
 @app.command("load-neo4j")
 def cmd_load_neo4j(
     file: str = typer.Option(..., help="Path to an instances TTL (e.g. ontology/world.ttl)"),
