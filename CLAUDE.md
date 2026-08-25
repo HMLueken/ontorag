@@ -17,6 +17,7 @@ uv sync --extra pageindex    # hierarchical PDF via hosted PageIndex API
 uv sync --extra llamaindex   # LlamaIndex fixed-chunk ingest
 uv sync --extra docling      # IBM Docling, layout-aware PDF/DOCX/PPTX
 uv sync --extra unstructured # Unstructured typed elements
+uv sync --extra neo4j        # Neo4j export (official bolt driver)
 ```
 
 ## CLI
@@ -44,6 +45,7 @@ Verbosity flags go before the subcommand: `uv run ontorag -v <command>` or `-vv`
 | `ontorag build-schema-card --previous ... --proposal ... --out ...` | Deterministic merge of proposal into schema card |
 | `ontorag export-schema-ttl --proposal ... --out ... --namespace ...` | Proposal/alignment JSON → OWL/RDFS Turtle |
 | `ontorag extract-instances --chunks ... --schema-card ... --out-ttl ...` | LLM instance extraction → RDF TTL with PROV provenance |
+| `ontorag load-neo4j --file ontology/world.ttl [--dry-run]` | Project an instances TTL into Neo4j as a native property graph (idempotent; needs `[neo4j]`) |
 | `ontorag sparql-server --onto ... --inst ...` | FastAPI in-memory SPARQL endpoint (port 8890) |
 | `ontorag mcp-server --onto ... --inst ...` | Knowledge graph MCP server (port 9010) |
 | `ontorag ontology-mcp --catalog ...` | Ontology catalog MCP server (port 9020) |
@@ -86,6 +88,7 @@ Documents
 | `proposal_to_ttl.py` | Schema proposal/alignment JSON → rdflib `Graph` (OWL/RDFS) |
 | `instances_to_ttl.py` | Instance proposals → rdflib `Graph` with PROV mention nodes |
 | `blazegraph.py` | Blazegraph REST API (upload TTL, SPARQL UPDATE) |
+| `neo4j_store.py` | Neo4j sink: RDF -> labelled property graph. `graph_to_rows()` is a pure, driver-free mapping (offline-testable); `load_rows()` does batched MERGE I/O. Neo4j is a **parallel serving target, not a `SparqlBackend`** — it is an LPG and does not answer SPARQL |
 | `sparql_server.py` | FastAPI SPARQL endpoint (SELECT/ASK/CONSTRUCT/DESCRIBE, content negotiation) |
 | `mcp_backend.py` | `SparqlBackend` ABC + `LocalRdfBackend` + `RemoteSparqlBackend` |
 | `mcp_server.py` | Knowledge graph MCP tools (`sparql_select`, `describe`, `list_by_class`, etc.) |
@@ -154,6 +157,7 @@ All LLM variables below are also settable as global CLI flags (flag > env > defa
 | `OPENROUTER_BASE_URL` | `--base-url` | OpenRouter endpoint (point at a local ollama to run offline) |
 | `OPENROUTER_APP_NAME` / `OPENROUTER_SITE_URL` | `--app-name` / `--site-url` | OpenRouter `X-Title` / `HTTP-Referer` headers |
 | `BLAZEGRAPH_ENDPOINT` | — | `load-ttl`, `sparql-update` commands |
+| `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` / `NEO4J_DATABASE` | `--uri` / `--user` / `--password` / `--database` | `load-neo4j` (defaults: `bolt://localhost:7687`, `neo4j`, no password, server default DB) |
 | `PAGEINDEX_API_KEY` | — | `ingest --engine pageindex` |
 | `ONTORAG_MCP_URL` | `--mcp-url` | Remote baseline resolution in `init-schema-card` (default: `https://mcp.rpg-schema.org`) |
 

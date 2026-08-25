@@ -1,0 +1,287 @@
+"""Neo4j sink: map an instances TTL into a native labelled property graph.
+
+Neo4j is an LPG, not a triple store — it does not answer SPARQL, and neosemantics
+imports RDF without changing that. So Neo4j is a **parallel serving target**, not a
+`SparqlBackend`: `world.ttl` stays canonical and this module projects it.
+
+The projection is deliberately native rather than RDF-shaped (n10s puts everything
+on `:Resource {uri}`), so the result is pleasant to query in Cypher:
+
+    ns:Character/ab12cd a ns:Character   ->  (:Character:Resource {iri, label})
+      rdfs:label "Bonisagus"             ->  .label
+      ns:age "1080"                      ->  .age            (datatype property)
+      ns:memberOf -> ns:Faction/xy       ->  -[:MEMBER_OF]->(:Faction)
+      prov:wasDerivedFrom [ a mcp:Mention ;
+        prov:value "…" ; mcp:chunkId … ] ->  -[:DERIVED_FROM]->(:Mention {quote, chunkId, …})
+
+`graph_to_rows()` is pure and has no driver dependency, so the mapping is testable
+offline; `load_rows()` does the I/O. The `neo4j` driver is imported lazily, so the
+package still imports without the `[neo4j]` extra.
+
+Mentions are blank nodes in the source graph (`instances_to_ttl.py`), so they carry
+no stable identity: re-importing would duplicate every citation. We mint a
+deterministic key from (instance IRI, chunk id, quote) and MERGE on it, which makes
+re-import idempotent — the same property instances already get from
+`_stable_instance_iri`.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from rdflib import BNode, Graph, Literal, URIRef
+from rdflib.namespace import RDF, RDFS
+
+from ontorag.verbosity import get_logger
+
+_log = get_logger("ontorag.neo4j_store")
+
+BATCH = 1000
+
+# Subjects typed with one of these are schema, not data — skip them, so pointing
+# this at a concatenated schema+world TTL still yields only instances.
+_SCHEMA_TYPES = {
+    "http://www.w3.org/2002/07/owl#Class",
+    "http://www.w3.org/2002/07/owl#ObjectProperty",
+    "http://www.w3.org/2002/07/owl#DatatypeProperty",
+    "http://www.w3.org/2002/07/owl#AnnotationProperty",
+    "http://www.w3.org/2002/07/owl#Ontology",
+    "http://www.w3.org/2000/01/rdf-schema#Class",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property",
+}
+# Typed on instances but meaningless as a Neo4j label.
+_NOISE_TYPES = {"http://www.w3.org/2002/07/owl#NamedIndividual"}
+
+
+# ── naming ───────────────────────────────────────────────────────────
+
+def local_name(iri: str) -> str:
+    return re.split(r"[#/]", str(iri).rstrip("/#"))[-1] if iri else ""
+
+
+def safe_label(name: str) -> str:
+    """Neo4j node label from a class local name (`Character` -> `Character`)."""
+    s = re.sub(r"[^0-9A-Za-z_]", "_", name)
+    return ("N" + s) if (not s or s[0].isdigit()) else s
+
+
+def rel_type(name: str) -> str:
+    """Neo4j relationship type from a predicate local name, in house style:
+    `memberOf` -> `MEMBER_OF`, `hasTag` -> `HAS_TAG`."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    s = re.sub(r"[^0-9A-Za-z_]", "_", s).upper()
+    return ("R" + s) if (not s or s[0].isdigit()) else s
+
+
+def mention_key(instance_iri: str, chunk_id: str, quote: str) -> str:
+    """Stable identity for a blank-node Mention, so re-import doesn't duplicate."""
+    return hashlib.sha1(f"{instance_iri}|{chunk_id}|{quote}".encode("utf-8")).hexdigest()
+
+
+def _py(value: Any) -> Any:
+    """rdflib term -> a value the Neo4j driver accepts."""
+    if isinstance(value, Literal):
+        try:
+            v = value.toPython()
+        except Exception:
+            return str(value)
+        return v if isinstance(v, (str, int, float, bool)) else str(v)
+    return str(value)
+
+
+def _add_prop(props: Dict[str, Any], key: str, value: Any) -> None:
+    """Repeated predicates collapse into a list property rather than last-wins."""
+    if key not in props:
+        props[key] = value
+        return
+    cur = props[key]
+    if isinstance(cur, list):
+        if value not in cur:
+            cur.append(value)
+    elif cur != value:
+        props[key] = [cur, value]
+
+
+# ── mapping (pure — no driver, no I/O) ───────────────────────────────
+
+def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
+    """Project an rdflib instances graph into Neo4j-ready rows.
+
+    Returns {"nodes": [...], "rels": [...], "mentions": [...]}. Node rows carry the
+    full class IRIs alongside the short labels, because local names collide across
+    namespaces (a baseline `rpg:Character` and a local `ns:Character` both shorten
+    to `Character`) and the IRI is what disambiguates them.
+
+    Object properties whose target is not itself an instance (an external URL or a
+    vocabulary term) become IRI-valued node properties rather than relationships,
+    since there would be nothing to MATCH on the far end.
+    """
+    mention_ids: set = set()
+    for s, _p, o in g.triples((None, RDF.type, None)):
+        if local_name(o) == "Mention":
+            mention_ids.add(s)
+
+    nodes: Dict[str, dict] = {}
+    rels: List[dict] = []
+    mentions: List[dict] = []
+
+    for subj in set(g.subjects()):
+        if subj in mention_ids or isinstance(subj, BNode):
+            continue
+        types = [str(t) for t in g.objects(subj, RDF.type)]
+        if not types or any(t in _SCHEMA_TYPES for t in types):
+            continue
+
+        iri = str(subj)
+        class_iris = [t for t in types if t not in _NOISE_TYPES]
+        node = {
+            "iri": iri,
+            "label": None,
+            "classes": sorted({safe_label(local_name(t)) for t in class_iris}),
+            "class_iris": sorted(class_iris),
+            "props": {},
+        }
+
+        for p, o in g.predicate_objects(subj):
+            if p == RDF.type:
+                continue
+            name = local_name(p)
+            if o in mention_ids:                                  # provenance
+                m = {local_name(mp): _py(mo) for mp, mo in g.predicate_objects(o)
+                     if mp != RDF.type}
+                quote = m.pop("value", "")                        # prov:value
+                chunk_id = str(m.get("chunkId", ""))
+                if not quote:
+                    continue
+                mentions.append({
+                    "key": mention_key(iri, chunk_id, str(quote)),
+                    "iri": iri,
+                    "props": {"quote": quote, **m},
+                })
+            elif isinstance(o, URIRef):                           # object property
+                rels.append({"from": iri, "to": str(o),
+                             "type": rel_type(name), "iri": str(p)})
+            elif p == RDFS.label:
+                node["label"] = _py(o)
+            else:                                                 # datatype property
+                _add_prop(node["props"], name, _py(o))
+
+        nodes[iri] = node
+
+    # An object property may point outside the graph — at a vocabulary term or a
+    # plain URL (dc:license -> creativecommons.org, schema:url -> a homepage).
+    # Those are real data, not dangling edges, and there is no node to MATCH at
+    # load time, so keep them as IRI-valued properties on the source node.
+    known = set(nodes)
+    kept: List[dict] = []
+    external = 0
+    for r in rels:
+        if r["to"] in known:
+            kept.append(r)
+        elif r["from"] in known:
+            _add_prop(nodes[r["from"]]["props"], local_name(r["iri"]), r["to"])
+            external += 1
+    if external:
+        _log.info("neo4j: %d object propert%s pointed outside the graph and became "
+                  "IRI-valued node properties", external, "y" if external == 1 else "ies")
+
+    _log.info("neo4j mapping: %d nodes, %d relationships, %d mentions",
+              len(nodes), len(kept), len(mentions))
+    return {"nodes": list(nodes.values()), "rels": kept, "mentions": mentions}
+
+
+# ── driver I/O ───────────────────────────────────────────────────────
+
+def _driver(uri: Optional[str], user: Optional[str], password: Optional[str]):
+    try:
+        from neo4j import GraphDatabase
+    except ImportError as e:
+        raise RuntimeError(
+            "Neo4j export needs the official driver:\n"
+            "    pip install 'ontorag[neo4j]'"
+        ) from e
+    uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    user = user or os.getenv("NEO4J_USER", "neo4j")
+    password = password or os.getenv("NEO4J_PASSWORD", "")
+    _log.info("neo4j: connecting to %s as %s", uri, user)
+    return GraphDatabase.driver(uri, auth=(user, password))
+
+
+def _batches(rows: List[dict], size: int = BATCH):
+    for i in range(0, len(rows), size):
+        yield rows[i:i + size]
+
+
+def load_rows(rows: Dict[str, List[dict]], *, uri: Optional[str] = None,
+              user: Optional[str] = None, password: Optional[str] = None,
+              database: Optional[str] = None, wipe: bool = False,
+              batch: int = BATCH) -> Dict[str, int]:
+    """Write mapped rows into Neo4j. Idempotent: everything MERGEs on a stable key."""
+    database = database or os.getenv("NEO4J_DATABASE") or None
+    counts = {"nodes": 0, "rels": 0, "mentions": 0}
+
+    with _driver(uri, user, password) as drv:
+        with drv.session(database=database) as ses:
+            ses.run("CREATE CONSTRAINT ontorag_resource_iri IF NOT EXISTS "
+                    "FOR (n:Resource) REQUIRE n.iri IS UNIQUE")
+            ses.run("CREATE CONSTRAINT ontorag_mention_key IF NOT EXISTS "
+                    "FOR (m:Mention) REQUIRE m.key IS UNIQUE")
+
+            if wipe:
+                _log.warning("neo4j: --wipe — deleting existing :Resource / :Mention nodes")
+                ses.run("MATCH (n) WHERE n:Resource OR n:Mention "
+                        "CALL { WITH n DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS")
+
+            # labels can't be parameterised, so group by label set (one query each)
+            by_labels: Dict[Tuple[str, ...], List[dict]] = defaultdict(list)
+            for n in rows["nodes"]:
+                by_labels[tuple(n["classes"])].append(n)
+            for labels, group in by_labels.items():
+                extra = "".join(f":`{l}`" for l in labels)
+                q = (f"UNWIND $rows AS row "
+                     f"MERGE (n:Resource{extra} {{iri: row.iri}}) "
+                     f"SET n += row.props, n.label = row.label, n.classIris = row.class_iris")
+                for chunk in _batches(group, batch):
+                    ses.run(q, rows=chunk)
+                    counts["nodes"] += len(chunk)
+
+            # same for relationship types
+            by_type: Dict[str, List[dict]] = defaultdict(list)
+            for r in rows["rels"]:
+                by_type[r["type"]].append(r)
+            for rtype, group in by_type.items():
+                q = (f"UNWIND $rows AS row "
+                     f"MATCH (a:Resource {{iri: row.from}}) "
+                     f"MATCH (b:Resource {{iri: row.to}}) "
+                     f"MERGE (a)-[rel:`{rtype}`]->(b) SET rel.iri = row.iri")
+                for chunk in _batches(group, batch):
+                    ses.run(q, rows=chunk)
+                    counts["rels"] += len(chunk)
+
+            q = ("UNWIND $rows AS row "
+                 "MATCH (n:Resource {iri: row.iri}) "
+                 "MERGE (m:Mention {key: row.key}) SET m += row.props "
+                 "MERGE (n)-[:DERIVED_FROM]->(m)")
+            for chunk in _batches(rows["mentions"], batch):
+                ses.run(q, rows=chunk)
+                counts["mentions"] += len(chunk)
+
+    _log.info("neo4j: loaded %(nodes)d nodes, %(rels)d relationships, %(mentions)d mentions",
+              counts)
+    return counts
+
+
+def neo4j_upload_ttl(ttl_path: str, *, uri: Optional[str] = None,
+                     user: Optional[str] = None, password: Optional[str] = None,
+                     database: Optional[str] = None, wipe: bool = False,
+                     batch: int = BATCH) -> Dict[str, int]:
+    """Parse an instances TTL and project it into Neo4j."""
+    g = Graph()
+    g.parse(str(Path(ttl_path)), format="turtle")
+    _log.info("neo4j: parsed %s (%d triples)", ttl_path, len(g))
+    return load_rows(graph_to_rows(g), uri=uri, user=user, password=password,
+                     database=database, wipe=wipe, batch=batch)

@@ -405,6 +405,40 @@ ontorag load-ttl \
   --graph urn:staging:schema
 ```
 
+**Project the graph into Neo4j:**
+
+```bash
+pip install 'ontorag[neo4j]'
+ontorag load-neo4j \
+  --file data/instances/doc_x.instances.ttl \
+  --uri bolt://localhost:7687 --user neo4j --password ******
+```
+
+Neo4j is a labelled property graph, not a triple store: it does not answer SPARQL,
+and neosemantics imports RDF without changing that. So this is a **parallel serving
+target** -- the TTL stays canonical -- and the projection is native rather than
+RDF-shaped, so the result is pleasant to query in Cypher:
+
+| RDF | Neo4j |
+|---|---|
+| `ns:Character/ab12 a ns:Character` | `(:Character:Resource {iri, label})` |
+| datatype property | node property |
+| object property | `-[:MEMBER_OF]->` (relationship) |
+| object property to an external IRI | node property holding the IRI |
+| `prov:wasDerivedFrom` -> `mcp:Mention` | `-[:DERIVED_FROM]->(:Mention {quote, chunkId, ...})` |
+
+Re-running is idempotent: instances MERGE on their stable IRI, and mentions (blank
+nodes in RDF, so identity-less) MERGE on a key minted from instance + chunk + quote.
+Use `--dry-run` to see the mapping counts without connecting, and `--wipe` to clear
+previously loaded `:Resource`/`:Mention` nodes first.
+
+Citations survive the trip:
+
+```cypher
+MATCH (n:Resource)-[:DERIVED_FROM]->(m:Mention)
+RETURN n.label, m.quote, m.sourcePath, m.page
+```
+
 **Execute a SPARQL UPDATE:**
 
 ```bash
@@ -616,6 +650,7 @@ ontorag/
   proposal_to_ttl.py                # Schema proposal -> OWL/RDFS Turtle
   instances_to_ttl.py               # Instance proposals -> RDF with provenance
   blazegraph.py                     # Blazegraph REST API integration
+  neo4j_store.py                    # Neo4j sink: RDF -> labelled property graph
   sparql_server.py                  # FastAPI in-memory SPARQL endpoint
   mcp_backend.py                    # SparqlBackend ABC + Local/Remote impls
   mcp_server.py                     # Knowledge graph MCP server

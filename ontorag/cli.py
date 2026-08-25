@@ -386,6 +386,45 @@ def cmd_load_ttl(
     typer.echo(f"OK load-ttl: file={file} graph={graph}")
 
 
+@app.command("load-neo4j")
+def cmd_load_neo4j(
+    file: str = typer.Option(..., help="Path to an instances TTL (e.g. ontology/world.ttl)"),
+    uri: Optional[str] = typer.Option(None, help="Bolt URI (default: env NEO4J_URI, else bolt://localhost:7687)"),
+    user: Optional[str] = typer.Option(None, help="Username (default: env NEO4J_USER, else neo4j)"),
+    password: Optional[str] = typer.Option(None, help="Password (default: env NEO4J_PASSWORD)"),
+    database: Optional[str] = typer.Option(None, help="Target database (default: env NEO4J_DATABASE, else the server default)"),
+    wipe: bool = typer.Option(False, "--wipe", help="DESTRUCTIVE: delete existing :Resource/:Mention nodes first"),
+    batch: int = typer.Option(1000, help="Rows per UNWIND batch"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Map and report counts without connecting to Neo4j"),
+):
+    """
+    Project an instances TTL into Neo4j as a native property graph.
+
+    Neo4j is a parallel serving target, not a SPARQL store: world.ttl stays canonical.
+    Instances become labelled nodes, object properties become relationships, and PROV
+    mention nodes become (:Mention) linked by [:DERIVED_FROM]. Re-running is
+    idempotent (everything MERGEs on a stable key). Needs the optional neo4j extra.
+    """
+    from rdflib import Graph as _Graph
+    from ontorag.neo4j_store import graph_to_rows, load_rows
+
+    g = _Graph()
+    g.parse(file, format="turtle")
+    _log.info("Parsed %s (%d triples)", file, len(g))
+    rows = graph_to_rows(g)
+
+    if dry_run:
+        typer.echo(f"OK load-neo4j (dry-run): file={file} "
+                   f"nodes={len(rows['nodes'])} rels={len(rows['rels'])} "
+                   f"mentions={len(rows['mentions'])}")
+        return
+
+    counts = load_rows(rows, uri=uri, user=user, password=password,
+                       database=database, wipe=wipe, batch=batch)
+    typer.echo(f"OK load-neo4j: file={file} nodes={counts['nodes']} "
+               f"rels={counts['rels']} mentions={counts['mentions']}")
+
+
 @app.command("sparql-update")
 def cmd_sparql_update(
     query_file: str = typer.Option(..., help="Path to SPARQL UPDATE file"),
