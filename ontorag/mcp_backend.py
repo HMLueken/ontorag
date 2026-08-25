@@ -29,6 +29,8 @@ from ontorag.verbosity import get_logger
 _log = get_logger("ontorag.mcp_backend")
 
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+PROV_DERIVED_FROM = "http://www.w3.org/ns/prov#wasDerivedFrom"
+PROV_VALUE = "http://www.w3.org/ns/prov#value"
 
 
 # ── SPARQL Results JSON helpers (the shared wire format) ─────────────
@@ -70,6 +72,17 @@ class GraphBackend(ABC):
     def incoming(self, iri: str, limit: int = 100) -> Dict[str, Any]:
         """Incoming edges, as SPARQL Results JSON (?s ?p)."""
 
+    @abstractmethod
+    def mentions(self, iris: Sequence[str], limit: int = 8) -> Dict[str, Any]:
+        """Provenance for the given instances, as SPARQL Results JSON
+        (?s ?quote ?source ?chunkId).
+
+        This is the "answers with receipts" primitive: every extracted fact links
+        back to the passage it came from. It lives on the backend because the
+        `mcp:Mention` model is ontorag's, and because a consumer should not have to
+        know whether it is walking RDF or an LPG to get a citation.
+        """
+
 
 class SparqlBackend(GraphBackend):
     """A GraphBackend over a SPARQL store: implement select() + construct() and the
@@ -101,6 +114,22 @@ class SparqlBackend(GraphBackend):
 
     def incoming(self, iri: str, limit: int = 100) -> Dict[str, Any]:
         return self.select(f"SELECT ?s ?p WHERE {{ ?s ?p <{iri}> }} LIMIT {int(limit)}")
+
+    def mentions(self, iris: Sequence[str], limit: int = 8) -> Dict[str, Any]:
+        if not iris:
+            return results_json(["s", "quote", "source", "chunkId"], [])
+        values = " ".join(f"<{i}>" for i in iris)
+        # sourcePath/chunkId live in a per-dataset `mcp:` namespace derived from the
+        # base IRI, so match them by local name rather than hardcoding a prefix
+        return self.select(
+            f"SELECT ?s ?quote ?source ?chunkId WHERE {{\n"
+            f"  VALUES ?s {{ {values} }}\n"
+            f"  ?s <{PROV_DERIVED_FROM}> ?m .\n"
+            f"  ?m <{PROV_VALUE}> ?quote .\n"
+            f'  OPTIONAL {{ ?m ?sp ?source . FILTER(STRENDS(STR(?sp), "sourcePath")) }}\n'
+            f'  OPTIONAL {{ ?m ?cp ?chunkId . FILTER(STRENDS(STR(?cp), "chunkId")) }}\n'
+            f"}} LIMIT {int(limit)}"
+        )
 
 
 # ── RDF implementations ──────────────────────────────────────────────

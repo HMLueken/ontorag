@@ -218,3 +218,34 @@ async def test_neo4j_backend_swaps_sparql_for_cypher(monkeypatch):
     assert NAV <= names
     assert "cypher_query" in names
     assert not {"sparql_select", "sparql_construct"} & names
+
+
+# ── provenance is a backend primitive, not a caller's job ────────────
+
+def test_sparql_mentions_walks_prov(rdf_backend):
+    magus = _values(rdf_backend.list_by_class(NS + "Magus"), "s")[0]
+    res = rdf_backend.mentions([magus])
+    assert res["head"]["vars"] == ["s", "quote", "source", "chunkId"]
+    assert _values(res, "quote") == ["Bonisagus founded the Order."]
+    # the mcp: namespace is per-dataset, so these are matched by local name
+    assert _values(res, "source") == ["amol://core.pdf"]
+    assert _values(res, "chunkId") == ["c1"]
+
+
+def test_mentions_of_nothing_is_an_empty_result(rdf_backend):
+    res = rdf_backend.mentions([])
+    assert res["results"]["bindings"] == []
+    assert res["head"]["vars"] == ["s", "quote", "source", "chunkId"]
+
+
+def test_neo4j_mentions_uses_parameters_not_interpolation(monkeypatch):
+    seen = {}
+    def rows(cypher, params):
+        seen.update(params)
+        return [_Rec(s=MAGUS, quote="Bonisagus founded the Order.",
+                     source="amol://core.pdf", chunkId="c1")]
+    b = _fake_backend(monkeypatch, rows)
+    res = b.mentions([MAGUS])
+    assert seen["iris"] == [MAGUS]          # bound as a parameter, not inlined
+    assert _values(res, "quote") == ["Bonisagus founded the Order."]
+    assert _values(res, "source") == ["amol://core.pdf"]

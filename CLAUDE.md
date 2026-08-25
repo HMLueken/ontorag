@@ -90,8 +90,8 @@ Documents
 | `blazegraph.py` | Blazegraph REST API (upload TTL, SPARQL UPDATE) |
 | `neo4j_store.py` | Neo4j sink: RDF -> labelled property graph. `graph_to_rows()` is a pure, driver-free mapping (offline-testable); `load_rows()` does batched MERGE I/O; `Neo4jBackend` serves the MCP tools in Cypher (read transactions, so writes are refused by the server). Neo4j is a **parallel serving target, not a `SparqlBackend`** — it is an LPG and does not answer SPARQL. The projection stores `propertyIris` on nodes and mentions so predicate IRIs survive the round trip |
 | `sparql_server.py` | FastAPI SPARQL endpoint (SELECT/ASK/CONSTRUCT/DESCRIBE, content negotiation) |
-| `mcp_backend.py` | `GraphBackend` ABC (`describe`/`list_by_class`/`outgoing`/`incoming`) + `SparqlBackend` (adds `select`/`construct`, and implements the four in SPARQL) + `LocalRdfBackend` + `RemoteSparqlBackend`. All navigation returns SPARQL Results JSON, whatever the store |
-| `mcp_server.py` | Knowledge graph MCP tools. Thin: the four navigation tools delegate to the backend; query-language tools are registered by capability — `sparql_select`/`sparql_construct` for `SparqlBackend`, `cypher_query` for Neo4j — so a client never sees a tool that must fail |
+| `mcp_backend.py` | `GraphBackend` ABC (`describe`/`list_by_class`/`outgoing`/`incoming`/`mentions`) + `SparqlBackend` (adds `select`/`construct`, and implements the four in SPARQL) + `LocalRdfBackend` + `RemoteSparqlBackend`. All navigation returns SPARQL Results JSON, whatever the store |
+| `mcp_server.py` | Knowledge graph MCP tools. Thin: the five navigation tools (incl. `mentions`, the citation primitive) delegate to the backend; query-language tools are registered by capability — `sparql_select`/`sparql_construct` for `SparqlBackend`, `cypher_query` for Neo4j — so a client never sees a tool that must fail |
 | `mcp_client.py` | Async SSE client for remote MCP |
 | `ontology_catalog.py` | Local catalog + OWL/TTL → schema card converter; remote baseline fetch |
 | `ontology_mcp.py` | Ontology catalog MCP server |

@@ -502,8 +502,9 @@ ontorag mcp-server \
 ontorag mcp-server --neo4j --uri bolt://localhost:7687 --user neo4j --password ******
 ```
 
-The four navigation tools -- `describe`, `list_by_class`, `outgoing`, `incoming` --
-are identical whichever backend is serving, and all return SPARQL Results JSON. The
+The navigation tools -- `describe`, `list_by_class`, `outgoing`, `incoming`, and
+`mentions` (the citation primitive: which source passages a fact came from) -- are
+identical whichever backend is serving, and all return SPARQL Results JSON. The
 query-language tool follows the store: RDF backends expose `sparql_select` /
 `sparql_construct`, Neo4j exposes `cypher_query` instead, so a client is never
 offered a tool that has to fail. Cypher runs in a read transaction, so the server

@@ -52,6 +52,11 @@ def create_mcp_app(backend: GraphBackend) -> FastMCP:
         """Incoming edges to a resource."""
         return backend.incoming(_sanitize_iri(iri), limit=limit)
 
+    @app.tool()
+    def mentions(iris: list[str], limit: int = 8) -> Dict[str, Any]:
+        """Source passages the given instances were extracted from (the citations)."""
+        return backend.mentions([_sanitize_iri(i) for i in iris], limit=limit)
+
     if isinstance(backend, SparqlBackend):
 
         @app.tool()

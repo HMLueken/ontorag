@@ -342,9 +342,11 @@ class Neo4jBackend(GraphBackend):
 
     # -- raw escape hatch, exposed as the `cypher_query` MCP tool --
 
-    def cypher(self, query: str, limit: int = 200) -> Dict[str, Any]:
-        """Run a read-only Cypher query; rows come back as SPARQL Results JSON."""
-        rows = self._read(query)[:limit]
+    def cypher(self, query: str, limit: int = 200,
+               params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Run a read-only Cypher query; rows come back as SPARQL Results JSON.
+        `params` are passed as real Cypher parameters — never interpolate values."""
+        rows = self._read(query, **(params or {}))[:limit]
         variables: List[str] = []
         for r in rows:
             for k in r:
@@ -403,6 +405,18 @@ class Neo4jBackend(GraphBackend):
             {"s": term(r["s"], "uri"),
              "p": term(r["p"], "uri" if _looks_iri(r["p"]) else "literal")}
             for r in rows])
+
+    def mentions(self, iris, limit: int = 8) -> Dict[str, Any]:
+        iris = list(iris)
+        if not iris:
+            return results_json(["s", "quote", "source", "chunkId"], [])
+        rows = self._read(
+            "MATCH (n:Resource)-[:DERIVED_FROM]->(m:Mention) WHERE n.iri IN $iris "
+            "RETURN n.iri AS s, m.quote AS quote, m.sourcePath AS source, "
+            "m.chunkId AS chunkId LIMIT $limit", iris=iris, limit=int(limit))
+        return results_json(["s", "quote", "source", "chunkId"], [
+            {"s": term(r["s"], "uri"), "quote": term(r["quote"]),
+             "source": term(r["source"]), "chunkId": term(r["chunkId"])} for r in rows])
 
     def describe(self, iri: str, accept: str = "text/turtle") -> str:
         """Rebuild the node's neighbourhood as RDF and serialise it, so `describe`
