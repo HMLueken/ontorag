@@ -24,8 +24,21 @@ app = typer.Typer(add_completion=False, help="OntoRAG CLI — ingestion, ontolog
 _log = get_logger("ontorag.cli")
 
 
+def _version_callback(value: bool):
+    if value:
+        from importlib.metadata import version
+        try:
+            typer.echo(f"ontorag {version('ontorag')}")
+        except Exception:
+            typer.echo("ontorag (version unknown — not installed as a distribution)")
+        raise typer.Exit()
+
+
 @app.callback()
 def _cli_callback(
+    version: bool = typer.Option(None, "--version", "-V", callback=_version_callback,
+                                is_eager=True,
+                                help="Print the installed ontorag version and exit."),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True,
                                 help="Verbosity level: -v for progress, -vv for debug traces."),
     model: Optional[str] = typer.Option(None, "--model", "-m",

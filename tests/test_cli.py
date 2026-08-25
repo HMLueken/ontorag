@@ -119,3 +119,11 @@ def test_llamaindex_engine_missing_is_friendly(tmp_path):
     r = ontorag("ingest", str(doc), "--engine", "llamaindex", "--out", str(tmp_path / "d"))
     assert r.returncode != 0
     assert "ontorag[llamaindex]" in (r.stdout + r.stderr)
+
+
+def test_version_flag():
+    """Every CLI should answer --version; the desktop sidecar smoke-tests with it."""
+    for flag in ("--version", "-V"):
+        r = ontorag(flag)
+        assert r.returncode == 0, f"{flag} failed: {r.stderr}"
+        assert r.stdout.startswith("ontorag "), r.stdout
