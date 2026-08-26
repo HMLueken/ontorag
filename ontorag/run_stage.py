@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import datetime
 import glob
+import hashlib
 import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ontorag.verbosity import get_logger
 
@@ -89,6 +90,105 @@ def _engine(root: pathlib.Path, *args: str, llm: bool = False, m: dict) -> None:
     _run(root, *pre, *args)
 
 
+# ── incremental extraction ───────────────────────────────────────────
+#
+# Ingest is already content-addressed: re-ingesting an unchanged file is a no-op.
+# The expensive half was not — adding one document re-ran the LLM over every chunk
+# in the corpus. The ledger below records which *documents* each LLM stage has
+# already seen, so a re-run only pays for what is new.
+#
+# Documents, not chunks, because a document is what a user adds and because
+# `stable_document_id` is a content hash: edit a file and it becomes a new
+# document, which is exactly when its chunks must be re-extracted.
+#
+# KNOWN LIMITATION: an *edited* file is re-extracted, but what its previous
+# version contributed is not removed. `world.ttl` is merged, so the graph then
+# holds instances from both revisions. Chunk ids are derived from the source slug
+# rather than the document id, so there is no reliable key to delete the
+# superseded triples by; until there is, `--full` is the remedy after edits.
+# Purely *adding* files -- the common case, and the one this is for -- is exact.
+
+STATE_FILE = "ontology/extraction_state.json"
+
+
+def _load_state(root: pathlib.Path) -> dict:
+    p = root / STATE_FILE
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _log.warning("%s is unreadable; treating every document as new", STATE_FILE)
+        return {}
+
+
+def _record_done(root: pathlib.Path, step: str, doc_ids: List[str]) -> None:
+    state = _load_state(root)
+    entry = state.setdefault(step, {"documents": []})
+    seen = set(entry.get("documents", []))
+    seen.update(doc_ids)
+    entry["documents"] = sorted(seen)
+    entry["updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    p = root / STATE_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_chunks(path: pathlib.Path) -> List[dict]:
+    if not path.is_file():
+        return []
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return out
+
+
+def pending_chunks(root: pathlib.Path, step: str, full: bool = False):
+    """Chunks this step has not processed yet, and the documents they belong to.
+
+    Returns (chunks, doc_ids). With `full`, everything is pending — the escape
+    hatch for a changed schema card or a corrected prompt, where past extractions
+    are no longer comparable.
+    """
+    chunks = _read_chunks(root / "content" / "chunks.jsonl")
+    if full:
+        return chunks, sorted({c.get("document_id", "") for c in chunks if c.get("document_id")})
+    done = set(_load_state(root).get(step, {}).get("documents", []))
+    fresh = [c for c in chunks if c.get("document_id") and c["document_id"] not in done]
+    return fresh, sorted({c["document_id"] for c in fresh})
+
+
+def _card_hash(root: pathlib.Path, card_rel: str) -> str:
+    p = root / card_rel
+    if not p.is_file():
+        return ""
+    return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+
+
+def _card_changed(root: pathlib.Path, card_rel: str) -> bool:
+    state = _load_state(root)
+    recorded = state.get("extract-instances", {}).get("card")
+    current = _card_hash(root, card_rel)
+    return bool(recorded) and recorded != current
+
+
+def _write_pending(root: pathlib.Path, chunks: List[dict], name: str) -> str:
+    """Materialise the pending chunks so the CLI command can be handed a file."""
+    rel = f"content/{name}"
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        for c in chunks:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    return rel
+
+
 def _ingest_and_chunk(root: pathlib.Path, m: dict) -> None:
     """Ingest every file in content/sources/ (content-hashed → new files only) and
     (re)build the single content/chunks.jsonl. Shared by propose + extract so the
@@ -105,7 +205,7 @@ def _ingest_and_chunk(root: pathlib.Path, m: dict) -> None:
             out.write(pathlib.Path(cf).read_text(encoding="utf-8"))
 
 
-def propose(root: pathlib.Path, m: dict) -> None:
+def propose(root: pathlib.Path, m: dict, full: bool = False) -> None:
     ns = m["dataset"]["base_iri"]
     baselines = m.get("baselines", [])
     (root / "ontology" / "catalog").mkdir(parents=True, exist_ok=True)
@@ -126,9 +226,20 @@ def propose(root: pathlib.Path, m: dict) -> None:
 
     _ingest_and_chunk(root, m)
 
-    _engine(root, "extract-schema", "--chunks", "content/chunks.jsonl",
-            "--schema-card", "ontology/schema_card.baseline.json",
-            "--out", "ontology/proposal.json", llm=True, m=m)
+    pending, doc_ids = pending_chunks(root, "extract-schema", full=full)
+    if not pending:
+        print("extract-schema: nothing new to induce (all documents already seen)",
+              flush=True)
+    else:
+        chunks_arg = _write_pending(root, pending, "chunks.pending.jsonl")
+        print(f"extract-schema: {len(pending)} chunk(s) from {len(doc_ids)} new "
+              f"document(s)", flush=True)
+        _engine(root, "extract-schema", "--chunks", chunks_arg,
+                "--schema-card", "ontology/schema_card.baseline.json",
+                "--raw-in", "ontology/proposals.raw.jsonl",
+                "--raw-out", "ontology/proposals.raw.jsonl",
+                "--out", "ontology/proposal.json", llm=True, m=m)
+        _record_done(root, "extract-schema", doc_ids)
     _engine(root, "align-schema", "--proposal", "ontology/proposal.json",
             "--baseline", "ontology/schema_card.baseline.json",
             "--out", "ontology/alignment.json", llm=True, m=m)
@@ -139,7 +250,7 @@ def propose(root: pathlib.Path, m: dict) -> None:
     save_state(root, m, "proposed")
 
 
-def extract(root: pathlib.Path, m: dict) -> None:
+def extract(root: pathlib.Path, m: dict, full: bool = False) -> None:
     ns = m["dataset"]["base_iri"]
     prefix = _safe_prefix(m["dataset"]["slug"])
     _ingest_and_chunk(root, m)  # pick up any files added since propose
@@ -153,15 +264,37 @@ def extract(root: pathlib.Path, m: dict) -> None:
     card = ("ontology/schema_card.json"
             if (root / "ontology" / "schema_card.json").exists()
             else "ontology/schema_card.proposed.json")
-    _engine(root, "extract-instances", "--chunks", "content/chunks.jsonl",
-            "--schema-card", card, "--out-ttl", "ontology/world.ttl", llm=True, m=m)
+    # Instances are extracted *against* the card, so approving a different model
+    # makes previous extractions incomparable -- fall back to a full pass rather
+    # than leaving a graph that is half one schema and half another.
+    if not full and _card_changed(root, card):
+        print("schema card changed since the last extraction — running a full pass",
+              flush=True)
+        full = True
+    pending, doc_ids = pending_chunks(root, "extract-instances", full=full)
+    if not pending:
+        print("extract-instances: nothing new to extract (all documents already seen)",
+              flush=True)
+    else:
+        chunks_arg = _write_pending(root, pending, "chunks.pending.jsonl")
+        print(f"extract-instances: {len(pending)} chunk(s) from {len(doc_ids)} new "
+              f"document(s)", flush=True)
+        args = ["extract-instances", "--chunks", chunks_arg,
+                "--schema-card", card, "--out-ttl", "ontology/world.ttl"]
+        if not full:
+            args.append("--merge")   # union with what is already in the graph
+        _engine(root, *args, llm=True, m=m)
+        _record_done(root, "extract-instances", doc_ids)
+        st = _load_state(root)
+        st.setdefault("extract-instances", {})["card"] = _card_hash(root, card)
+        (root / STATE_FILE).write_text(json.dumps(st, indent=2) + "\n", encoding="utf-8")
     save_state(root, m, "extracted")
 
 
 STAGES = {"propose": propose, "extract": extract}
 
 
-def run(stage: str, root: Optional[str] = None) -> None:
+def run(stage: str, root: Optional[str] = None, full: bool = False) -> None:
     if stage not in STAGES:
         raise SystemExit(f"unknown stage {stage!r}; expected one of {list(STAGES)}")
     path = pathlib.Path(root or ".").resolve()
@@ -169,5 +302,5 @@ def run(stage: str, root: Optional[str] = None) -> None:
         raise SystemExit(f"no manifest.json in {path} — is this a dataset directory?")
     m = load_manifest(path)
     _log.info("running stage %s in %s", stage, path)
-    STAGES[stage](path, m)
+    STAGES[stage](path, m, full=full)
     print(f"stage {stage} complete", flush=True)

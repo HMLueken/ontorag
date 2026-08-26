@@ -96,8 +96,10 @@ def test_reimport_is_idempotent(rows):
     """Mentions are blank nodes with no stable identity — the minted key is what
     stops a second import from duplicating every citation."""
     again = ns.graph_to_rows(instance_proposals_to_graph(CHUNKS, PROPOSALS, namespace=NS))
-    assert [m["key"] for m in again["mentions"]] == [m["key"] for m in rows["mentions"]]
-    assert [n["iri"] for n in again["nodes"]] == [n["iri"] for n in rows["nodes"]]
+    # compare as sets: mention nodes are blank nodes with randomised ids, so subject
+    # iteration order varies between graphs. Identity is what must be stable, not order.
+    assert {m["key"] for m in again["mentions"]} == {m["key"] for m in rows["mentions"]}
+    assert {n["iri"] for n in again["nodes"]} == {n["iri"] for n in rows["nodes"]}
 
 
 def test_mention_key_varies_with_quote_and_instance():

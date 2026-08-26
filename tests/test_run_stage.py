@@ -11,6 +11,24 @@ import pytest
 from ontorag import run_stage
 
 
+def _chunks(tmp_path, *docs):
+    """Write the chunk artifacts a real `ontorag ingest` would leave behind.
+
+    Both the per-document DTO files *and* the assembled chunks.jsonl, because
+    _ingest_and_chunk rebuilds the latter from the former — writing only
+    chunks.jsonl would see it truncated the moment a stage runs.
+    """
+    dto = tmp_path / "content" / "dto" / "chunks"
+    dto.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for doc in docs:
+        rows = [json.dumps({"document_id": doc, "chunk_id": f"{doc}::{i}",
+                            "text": "x", "chunk_index": i}) for i in range(2)]
+        (dto / f"{doc}.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        lines += rows
+    (tmp_path / "content" / "chunks.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _setup(tmp_path: Path) -> dict:
     (tmp_path / "content" / "sources").mkdir(parents=True)
     (tmp_path / "content" / "sources" / "a.md").write_text("# A\nsome text", encoding="utf-8")
@@ -23,6 +41,10 @@ def _setup(tmp_path: Path) -> dict:
         "baselines": ["rpg"],
     }
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    # _run is stubbed in these tests, so the real ingest never runs; write the
+    # chunks it would have produced, otherwise the incremental check correctly
+    # concludes there is nothing to extract and skips the LLM steps under test.
+    _chunks(tmp_path, "doc_a")
     return manifest
 
 
@@ -41,7 +63,9 @@ def test_propose_assembly(tmp_path, calls):
     assert any("init-schema-card --baselines rpg" in c for c in calls)
     assert any(c.startswith("ingest content/sources/a.md") for c in calls)
     es = next(c for c in calls if "extract-schema" in c)
-    assert "--chunks content/chunks.jsonl" in es
+    # induction runs over the pending set, not the whole corpus
+    assert "--chunks content/chunks.pending.jsonl" in es
+    assert "--raw-in ontology/proposals.raw.jsonl" in es
     assert "--model m/x" in es and "--concurrency 3" in es   # LLM flags applied
     assert any("align-schema" in c for c in calls)
     assert any("build-schema-card" in c for c in calls)
@@ -91,3 +115,71 @@ def test_failing_step_reports_which_one(tmp_path, monkeypatch):
     msg = str(e.value)
     assert "stage failed at" in msg and "exit 1" in msg, msg
     assert "Traceback" not in msg
+
+
+# ── incremental extraction ───────────────────────────────────────────
+
+def test_pending_is_everything_on_a_first_run(tmp_path):
+    _chunks(tmp_path, "doc_a", "doc_b")
+    chunks, docs = run_stage.pending_chunks(tmp_path, "extract-schema")
+    assert docs == ["doc_a", "doc_b"] and len(chunks) == 4
+
+
+def test_pending_excludes_documents_already_processed(tmp_path):
+    _chunks(tmp_path, "doc_a", "doc_b")
+    run_stage._record_done(tmp_path, "extract-schema", ["doc_a"])
+    chunks, docs = run_stage.pending_chunks(tmp_path, "extract-schema")
+    assert docs == ["doc_b"], "only the new document should be re-sent to the LLM"
+    assert {c["document_id"] for c in chunks} == {"doc_b"}
+
+
+def test_ledger_is_per_step(tmp_path):
+    """Inducing the schema from a document does not mean instances were extracted."""
+    _chunks(tmp_path, "doc_a")
+    run_stage._record_done(tmp_path, "extract-schema", ["doc_a"])
+    _, schema_docs = run_stage.pending_chunks(tmp_path, "extract-schema")
+    _, inst_docs = run_stage.pending_chunks(tmp_path, "extract-instances")
+    assert schema_docs == [] and inst_docs == ["doc_a"]
+
+
+def test_full_ignores_the_ledger(tmp_path):
+    _chunks(tmp_path, "doc_a", "doc_b")
+    run_stage._record_done(tmp_path, "extract-schema", ["doc_a", "doc_b"])
+    _, docs = run_stage.pending_chunks(tmp_path, "extract-schema", full=True)
+    assert docs == ["doc_a", "doc_b"]
+
+
+def test_unreadable_ledger_falls_back_to_reprocessing(tmp_path):
+    """Corrupt state must cost money, not correctness."""
+    _chunks(tmp_path, "doc_a")
+    p = tmp_path / run_stage.STATE_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{ not json", encoding="utf-8")
+    _, docs = run_stage.pending_chunks(tmp_path, "extract-schema")
+    assert docs == ["doc_a"]
+
+
+def test_propose_skips_the_llm_when_nothing_is_new(tmp_path, calls, capsys):
+    m = _setup(tmp_path)
+    run_stage.propose(tmp_path, m)          # first pass populates the ledger
+    calls.clear()
+    # the ingest step re-runs (cheap, no LLM) but induction must not
+    run_stage.propose(tmp_path, m)
+    assert not any("extract-schema" in c for c in calls), calls
+    assert "nothing new to induce" in capsys.readouterr().out
+
+
+def test_a_changed_schema_card_forces_a_full_instance_pass(tmp_path):
+    _chunks(tmp_path, "doc_a")
+    card = "ontology/schema_card.json"
+    (tmp_path / "ontology").mkdir(parents=True, exist_ok=True)
+    (tmp_path / card).write_text('{"classes": []}', encoding="utf-8")
+    run_stage._record_done(tmp_path, "extract-instances", ["doc_a"])
+    st = run_stage._load_state(tmp_path)
+    st["extract-instances"]["card"] = run_stage._card_hash(tmp_path, card)
+    (tmp_path / run_stage.STATE_FILE).write_text(json.dumps(st), encoding="utf-8")
+
+    assert not run_stage._card_changed(tmp_path, card)
+    (tmp_path / card).write_text('{"classes": [{"name": "Magus"}]}', encoding="utf-8")
+    assert run_stage._card_changed(tmp_path, card), \
+        "a graph half-extracted against one model and half another is worse than a re-run"

@@ -160,9 +160,15 @@ def cmd_extract_schema(
     chunks: str = typer.Option(..., help="Path to chunks JSONL (ChunkDTO records)"),
     schema_card: str = typer.Option(..., help="Path to current schema_card.json"),
     out: str = typer.Option(..., help="Output path for aggregated schema proposal JSON"),
+    raw_in: Optional[str] = typer.Option(None, "--raw-in", help="Per-chunk proposals kept from previous runs (JSONL), aggregated alongside this run"),
+    raw_out: Optional[str] = typer.Option(None, "--raw-out", help="Append this run's per-chunk proposals to this JSONL store"),
 ):
     """
     Run ontology induction on DTO chunks and produce an aggregated schema proposal (JSON).
+
+    For incremental extraction, keep the per-chunk proposals with --raw-out and feed
+    them back with --raw-in: the LLM then runs only over the chunks you pass, while
+    the aggregate is rebuilt from everything ever proposed.
     """
     from ontorag.ontology_extractor_openrouter import extract_schema_chunk_proposals
 
@@ -198,8 +204,28 @@ def cmd_extract_schema(
     chunk_proposals = extract_schema_chunk_proposals(chunks_list, card, on_chunk_done=_on_chunk)
 
     # 2) aggregate document-level
-    typer.echo(f"Aggregating {len(chunk_proposals)} chunk proposals...")
-    aggregated = aggregate_chunk_proposals(chunk_proposals)
+    #
+    # Incrementality works by keeping the *per-chunk* proposals rather than merging
+    # aggregates: aggregation is deterministic and cheap, so rebuilding it from
+    # everything ever proposed keeps one code path and one meaning of "the
+    # proposal", whether or not this run was incremental.
+    if raw_out:
+        Path(raw_out).parent.mkdir(parents=True, exist_ok=True)
+        with open(raw_out, "a", encoding="utf-8") as fh:
+            for cp in chunk_proposals:
+                fh.write(json.dumps(cp, ensure_ascii=False) + "\n")
+        typer.echo(f"  kept {len(chunk_proposals)} per-chunk proposals in {raw_out}")
+
+    all_proposals = list(chunk_proposals)
+    if raw_in and Path(raw_in).is_file():
+        previous = read_jsonl(raw_in)
+        if raw_out and Path(raw_out).resolve() == Path(raw_in).resolve():
+            previous = previous[: max(0, len(previous) - len(chunk_proposals))]
+        all_proposals = previous + chunk_proposals
+        typer.echo(f"  aggregating {len(previous)} previous + {len(chunk_proposals)} new")
+
+    typer.echo(f"Aggregating {len(all_proposals)} chunk proposals...")
+    aggregated = aggregate_chunk_proposals(all_proposals)
 
     agg_cls = len(aggregated.get("classes", []))
     agg_dp = len(aggregated.get("datatype_properties", []))
@@ -403,6 +429,7 @@ def cmd_load_ttl(
 def cmd_run_stage(
     stage: str = typer.Argument(..., help="Pipeline stage: propose | extract"),
     root: Optional[str] = typer.Option(None, "--root", help="Dataset directory (default: cwd)"),
+    full: bool = typer.Option(False, "--full", help="Re-process every document, ignoring what previous runs already extracted"),
 ):
     """
     Run one governed pipeline stage over a dataset directory.
@@ -411,10 +438,17 @@ def cmd_run_stage(
     both drive, so there is exactly one definition of what `propose` and `extract`
     mean. A frozen single-file build re-invokes itself, so a packaged app can run a
     stage with no Python installed.
+
+    Extraction is incremental: only documents no previous run has processed are sent
+    to the LLM, so adding one file to a large corpus costs one file. Use --full to
+    re-process everything (a changed schema card forces this for instances anyway).
+
+    Adding files is exact. Editing one re-extracts it, but does not retract what its
+    previous version contributed to the graph — run --full after edits.
     """
     from ontorag.run_stage import run
 
-    run(stage, root)
+    run(stage, root, full=full)
 
 
 @app.command("load-neo4j")
@@ -475,6 +509,7 @@ def cmd_extract_instances(
     chunks: str = typer.Option(..., help="Path to chunks JSONL (ChunkDTO records)"),
     schema_card: str = typer.Option(..., help="Path to schema_card.json"),
     out_ttl: str = typer.Option(..., help="Output TTL for instances + provenance"),
+    merge: bool = typer.Option(False, "--merge", help="Union into an existing out-ttl rather than replacing it (incremental extraction)"),
 ):
     """
     DTO chunks -> instance proposals (OpenRouter) -> RDF TTL (instances + provenance).
@@ -497,6 +532,14 @@ def cmd_extract_instances(
     ns = card.get("namespace") or "http://www.example.com/biz/"
     _log.info("Converting %d proposals to RDF (namespace=%s)", len(proposals), ns)
     g = instance_proposals_to_graph(chunks_by_id, proposals, namespace=ns)
+
+    if merge and Path(out_ttl).is_file():
+        # Instance IRIs derive from (class, label, chunk_id) and mention keys from
+        # their quote, so the union is idempotent: re-extracting a document that is
+        # already in the graph contributes nothing new.
+        new_triples = len(g)
+        g.parse(out_ttl, format="turtle")
+        typer.echo(f"  merged into existing graph: {new_triples} new, {len(g)} total")
 
     Path(out_ttl).parent.mkdir(parents=True, exist_ok=True)
     g.serialize(destination=out_ttl, format="turtle")

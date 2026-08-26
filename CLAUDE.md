@@ -51,7 +51,7 @@ Verbosity flags go before the subcommand: `uv run ontorag -v <command>` or `-vv`
 | `ontorag ontology-mcp --catalog ...` | Ontology catalog MCP server (port 9020) |
 | `ontorag register-ontology <slug> <ttl>` | Register a baseline OWL/TTL into the catalog |
 | `ontorag init-schema-card --baselines foaf,prov --out ...` | Compose baselines → initial schema card |
-| `ontorag run-stage <propose\|extract> [--root DIR]` | Run one governed pipeline stage over a dataset dir — the single definition of stage composition, driven by Actions, the Hub and the desktop client alike |
+| `ontorag run-stage <propose\|extract> [--root DIR] [--full]` | Run one governed pipeline stage over a dataset dir — the single definition of stage composition, driven by Actions, the Hub and the desktop client alike |
 | `ontorag hub push <dir> --repo owner/name [--no-include-sources]` | Publish a built dataset to GitHub for the Hub (synth manifest.json + Git Data API commit) |
 
 ## Architecture
@@ -77,7 +77,7 @@ Documents
 | File | Role |
 |---|---|
 | `cli.py` | Typer CLI — all 15 commands (incl. `doctor`, `hub push`) |
-| `run_stage.py` | Stage composition (`propose`, `extract`): which CLI commands run, in what order, with which manifest-derived LLM flags. Previously copied into every dataset repo as `.hub/run_stage.py`, which drifted and never reached already-provisioned repos. A frozen build re-invokes `sys.executable`, so a packaged app runs stages with no Python installed |
+| `run_stage.py` | Stage composition (`propose`, `extract`) **and incremental extraction**: `ontology/extraction_state.json` records which documents each LLM step has seen, so adding a file to a large corpus only pays for that file. Schema induction keeps per-chunk proposals (`ontology/proposals.raw.jsonl`) and re-aggregates rather than merging aggregates; instances union into `world.ttl`. A changed schema card forces a full instance pass. Editing a file re-extracts it but does not retract its previous contribution — `--full` after edits. Also: which CLI commands run, in what order, with which manifest-derived LLM flags. Previously copied into every dataset repo as `.hub/run_stage.py`, which drifted and never reached already-provisioned repos. A frozen build re-invokes `sys.executable`, so a packaged app runs stages with no Python installed |
 | `hub_push.py` | Publish a dataset to GitHub for the Hub: synth Hub-compatible `manifest.json` (base IRI + counts from the graph) + single-commit via the Git Data API; `--include-sources` toggles the raw corpus |
 | `dto.py` | `DocumentDTO`, `ChunkDTO`, `ProvenanceDTO`; content-hash (`stable_document_id`) |
 | `extractor_ingest.py` | Pluggable ingest engines (`ENGINES` registry): builtin (default), pageindex, llamaindex, docling, unstructured; `engine_status()` powers `doctor` |
