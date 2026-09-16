@@ -546,6 +546,57 @@ def cmd_extract_instances(
     typer.echo(f"OK extract-instances: chunks={len(chunks_list)} out={out_ttl}")
 
 
+@app.command("index")
+def cmd_index(
+    dataset_dir: str = typer.Argument(".", help="Dataset directory (contains embeddings/)."),
+    out: Optional[str] = typer.Option(None, "--out", help="Output path (default: <dataset>/.ontorag/vectors.db)."),
+    quantize: str = typer.Option("turbo4", "--quantize",
+                                 help="turbo4|turbo3|turbo2|int8|1bit|none — index size vs recall."),
+    chunks: bool = typer.Option(True, "--chunks/--no-chunks",
+                                help="Carry chunk text so the file answers a query on its own."),
+    ship: bool = typer.Option(False, "--ship",
+                              help="Write the publishable form: quantised index, full-precision vectors dropped."),
+    force: bool = typer.Option(False, "--force", help="Rebuild even if the shards have not changed."),
+    download: bool = typer.Option(False, "--download",
+                                  help="Fetch the sqlite-vector extension once into ~/.cache/ontorag."),
+):
+    """
+    Build the query form of a dataset's vectors: one SQLite file, searchable.
+
+    The committed form stays the per-document JSONL shards -- diffable and
+    incremental. This is a *cache* built from them, so that a consumer answers a
+    nearest-neighbour query by opening a file instead of loading every vector into
+    memory first (measured on a 17,942-chunk corpus: 46 ms and 27 MB of RSS,
+    against 5.7 s and 555 MB for the dict it replaces).
+
+    `--ship` writes the other useful artefact: the quantised index without the
+    full-precision column -- 9 MB where the shards are 144 MB, 33 MB with the chunk
+    text -- small enough to attach to a release so that consumers, including ones
+    who cannot clone a private dataset, reuse the vectors instead of rebuilding
+    them. It is derived data either way: never commit it into the dataset.
+    """
+    from ontorag import vector_index as vi
+
+    try:
+        ext = vi.extension_path(download=download)
+        res = vi.build(dataset_dir, out=out, quantize=quantize, with_chunks=chunks,
+                       ship=ship, force=force, extension=ext)
+    except vi.VectorIndexError as e:
+        raise typer.BadParameter(str(e))
+
+    if res.skipped:
+        typer.echo(f"OK index: unchanged ({res.vectors} vectors, {res.bytes/1e6:.1f} MB) "
+                   f"at {res.path} — use --force to rebuild")
+        return
+    typer.echo(
+        f"OK index: {res.vectors} vectors"
+        + (f", {res.chunks} chunk texts" if res.chunks else "")
+        + (f", {res.quantized} quantised ({quantize})" if res.quantized else "")
+        + f" in {res.seconds:.1f}s -> {res.path} ({res.bytes/1e6:.1f} MB)"
+        + (" [shippable]" if ship else "")
+    )
+
+
 @app.command("sparql-server")
 def cmd_sparql_server(
     onto: Optional[str] = typer.Option(None, help="Ontology TTL path (default: env ONTOLOGY_TTL)"),
@@ -602,7 +653,7 @@ def cmd_mcp_server(
     not answer SPARQL.
     """
     from ontorag.mcp_backend import LocalRdfBackend, RemoteSparqlBackend
-    from ontorag.mcp_server import create_mcp_app
+    from ontorag.mcp_server import create_mcp_app, serve
 
     if neo4j:
         from ontorag.neo4j_store import Neo4jBackend
@@ -618,9 +669,7 @@ def cmd_mcp_server(
         _log.info("MCP server: local backend onto=%s inst=%s", onto, inst)
         backend = LocalRdfBackend(onto, inst)
 
-    app_mcp = create_mcp_app(backend)
-    _log.info("Starting MCP server on %s:%d", host, port)
-    app_mcp.run(host=host, port=port)
+    serve(create_mcp_app(backend), host, port)
 
 
 @app.command("ontology-mcp")
@@ -643,8 +692,9 @@ def cmd_ontology_mcp(
     from ontorag.ontology_mcp import create_ontology_mcp
 
     _log.info("Starting ontology catalog MCP on %s:%d (catalog=%s)", host, port, catalog)
-    mcp_app = create_ontology_mcp(catalog)
-    mcp_app.run(host=host, port=port)
+    from ontorag.mcp_server import serve
+
+    serve(create_ontology_mcp(catalog), host, port)
 
 
 @app.command("register-ontology")
@@ -724,6 +774,14 @@ def cmd_doctor():
     have_pdf = _u.find_spec("fitz") is not None
     pdf_hint = "" if have_pdf else "→ pip install 'ontorag[pdf]' (PyMuPDF)"
     typer.echo(f"  {'OK ' if have_pdf else '-- '} {'builtin-pdf':13}{pdf_hint}")
+
+    from ontorag import vector_index as vi
+    try:
+        ext = vi.extension_path()
+        vec_line = f"OK  sqlite-vector {vi.EXTENSION_VERSION} at {ext}"
+    except vi.VectorIndexError as e:
+        vec_line = f"--  sqlite-vector    → {e}"
+    typer.echo(f"\nVector index (`ontorag index`):\n  {vec_line}")
 
     key_llm = bool(llm_config.api_key())
     typer.echo("\nLLM (extract-schema / extract-instances / align-schema):")

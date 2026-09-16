@@ -193,6 +193,43 @@ def test_neo4j_describe_skips_properties_with_no_recorded_iri(monkeypatch):
     assert "mystery" not in g.serialize(format="turtle")
 
 
+# ── serving the tools ────────────────────────────────────────────────
+
+
+def test_serve_names_an_http_transport():
+    """`ontorag mcp-server --host --port` shipped broken because it did not.
+
+    FastMCP defaults to stdio and forwards unrecognised keyword arguments to the
+    transport it chose, so `app.run(host=…, port=…)` reaches `run_stdio_async()`,
+    which takes neither, and the command dies at startup.
+    """
+    from ontorag.mcp_server import serve
+
+    seen = {}
+
+    class FakeApp:
+        def run(self, *args, **kwargs):
+            seen.update(kwargs)
+            seen["positional"] = args
+
+    serve(FakeApp(), "127.0.0.1", 9010)
+    assert seen.get("transport") == "http", "a transport must be named"
+    assert seen.get("host") == "127.0.0.1" and seen.get("port") == 9010
+
+
+def test_serve_arguments_fit_the_installed_fastmcp():
+    """The version-drift half: checked against whatever fastmcp is installed, so
+    CI fails here rather than in a user's terminal when the API moves again."""
+    import inspect
+
+    from fastmcp import FastMCP
+
+    params = inspect.signature(FastMCP.run_http_async).parameters
+    for kw in ("transport", "host", "port"):
+        assert kw in params, f"fastmcp's HTTP transport no longer takes {kw}"
+    assert "transport" in inspect.signature(FastMCP.run).parameters
+
+
 # ── MCP tool surface adapts to the backend ───────────────────────────
 
 async def _tool_names(backend):

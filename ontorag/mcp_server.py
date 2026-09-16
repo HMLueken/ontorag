@@ -20,6 +20,23 @@ def _sanitize_iri(iri: str) -> str:
     return iri
 
 
+def serve(app: FastMCP, host: str, port: int) -> None:
+    """Serve an MCP app over HTTP on host:port.
+
+    The transport must be named. FastMCP defaults to **stdio** and forwards any
+    extra keyword arguments to the transport it picked, so `app.run(host=…,
+    port=…)` — which is what this did — reaches `run_stdio_async()`, which takes
+    neither, and the server dies at startup with
+
+        TypeError: run_stdio_async() got an unexpected keyword argument 'host'
+
+    on every fastmcp that has shipped a transport default (2.x, 3.x, 4.x alike).
+    A CLI that offers --host and --port has to say http.
+    """
+    _log.info("Starting MCP server on %s:%d", host, port)
+    app.run(transport="http", host=host, port=port)
+
+
 def create_mcp_app(backend: GraphBackend) -> FastMCP:
     """Expose a graph backend over MCP.
 

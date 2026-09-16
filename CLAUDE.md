@@ -46,6 +46,7 @@ Verbosity flags go before the subcommand: `uv run ontorag -v <command>` or `-vv`
 | `ontorag export-schema-ttl --proposal ... --out ... --namespace ...` | Proposal/alignment JSON → OWL/RDFS Turtle |
 | `ontorag extract-instances --chunks ... --schema-card ... --out-ttl ...` | LLM instance extraction → RDF TTL with PROV provenance |
 | `ontorag load-neo4j --file ontology/world.ttl [--dry-run]` | Project an instances TTL into Neo4j as a native property graph (idempotent; needs `[neo4j]`) |
+| `ontorag index <dir> [--ship] [--quantize turbo4]` | Build the query form of a dataset's vectors: sqlite-vector DB from the JSONL shards. A cache (`.ontorag/vectors.db`, gitignored), or `--ship` for a 9-33 MB publishable index |
 | `ontorag sparql-server --onto ... --inst ...` | FastAPI in-memory SPARQL endpoint (port 8890) |
 | `ontorag mcp-server --onto ... --inst ...` | Knowledge graph MCP server (port 9010); also `--sparql-endpoint <url>` or `--neo4j` |
 | `ontorag ontology-mcp --catalog ...` | Ontology catalog MCP server (port 9020) |
@@ -91,6 +92,7 @@ Documents
 | `instances_to_ttl.py` | Instance proposals → rdflib `Graph` with PROV mention nodes |
 | `blazegraph.py` | Blazegraph REST API (upload TTL, SPARQL UPDATE) |
 | `neo4j_store.py` | Neo4j sink: RDF -> labelled property graph. `graph_to_rows()` is a pure, driver-free mapping (offline-testable); `load_rows()` does batched MERGE I/O; `Neo4jBackend` serves the MCP tools in Cypher (read transactions, so writes are refused by the server). Neo4j is a **parallel serving target, not a `SparqlBackend`** — it is an LPG and does not answer SPARQL. The projection stores `propertyIris` on nodes and mentions so predicate IRIs survive the round trip |
+| `vector_index.py` | Vectors as a query form: JSONL shards -> one SQLite file searched by [sqlite-vector](https://github.com/sqliteai/sqlite-vector). The shards stay the committed, incremental source; this is derived and disposable, stamped (sha256 of config + shard size/mtime) so an unchanged dataset is not rebuilt. `--ship` drops the full-precision column and keeps the quantised index -- 9 MB against 144 MB of shards, still answering -- for attaching to a release. The extension is a pinned binary, fetched on demand: there is no PyPI package (the `sqlite-vector` name there is an unrelated project) |
 | `sparql_server.py` | FastAPI SPARQL endpoint (SELECT/ASK/CONSTRUCT/DESCRIBE, content negotiation) |
 | `mcp_backend.py` | `GraphBackend` ABC (`describe`/`list_by_class`/`outgoing`/`incoming`/`mentions`) + `SparqlBackend` (adds `select`/`construct`, and implements the four in SPARQL) + `LocalRdfBackend` + `RemoteSparqlBackend`. All navigation returns SPARQL Results JSON, whatever the store |
 | `mcp_server.py` | Knowledge graph MCP tools. Thin: the five navigation tools (incl. `mentions`, the citation primitive) delegate to the backend; query-language tools are registered by capability — `sparql_select`/`sparql_construct` for `SparqlBackend`, `cypher_query` for Neo4j — so a client never sees a tool that must fail |

@@ -462,6 +462,61 @@ Endpoints:
 
 Supports content negotiation: JSON, CSV, TSV, XML, Turtle, N-Triples, JSON-LD.
 
+### Vector index
+
+A dataset's embeddings are committed as per-document JSONL shards
+(`embeddings/vectors/<doc>.jsonl`) — diffable, and incremental in the same way
+extraction is: a new document is a new file, not a rewritten blob. That is the right
+*storage* form and a poor *query* form. A consumer that wants nearest-neighbour
+search has to read every shard and hold every vector in memory before it can answer
+anything: 144 MB of JSONL and ~555 MB of Python objects, for a 17,942-chunk corpus.
+
+`ontorag index` builds the query form from the shards — one SQLite file, searched
+with [sqlite-vector](https://github.com/sqliteai/sqlite-vector):
+
+```bash
+ontorag index --download           # fetch the extension once, then build
+ontorag index /path/to/dataset     # rebuild only if the shards changed
+```
+
+Measured on that corpus (17,942 chunks × 768 dims, ollama `nomic-embed-text`):
+
+| | open | query | RSS | file |
+|---|---|---|---|---|
+| every vector in a dict (what a consumer does today) | 5.7 s | — | 555 MB | 144 MB of JSONL |
+| `vectors.db`, exact scan | 26 ms | 65 ms | 14 MB | 106 MB |
+| `vectors.db`, TurboQuant-4 | 46 ms | 19 ms | 27 MB | 106 MB |
+| `--ship`, quantised only | 46 ms | 19 ms | 27 MB | **9 MB** |
+| `--ship` with chunk text | 46 ms | 19 ms | 27 MB | **33 MB** |
+
+`--quantize` trades index size for recall (recall@10 against an exact scan, same
+corpus): `turbo4` 94.8%, `turbo3` 92.0%, `turbo2` 85.2%, `int8` 98.8%, `1bit` 70.0%,
+`none` for exact scans only.
+
+**It is derived data.** The build writes to `<dataset>/.ontorag/vectors.db` and drops
+a `.gitignore` beside it, because the file is a cache: rebuilt in ~7 s whenever the
+shards change, and never committed. A single binary in git history would undo exactly
+the property the shards exist for — every re-index would rewrite the whole file, and
+git keeps every version.
+
+**`--ship` is the other artefact.** It drops the full-precision column and keeps the
+quantised index, which still answers:
+
+```bash
+ontorag index . --ship --no-chunks    #  9 MB: ids + distances
+ontorag index . --ship                # 33 MB: answers with the passage text
+```
+
+Small enough to attach to a GitHub Release, which is how to publish vectors without
+putting a binary in a repo's history — and a release asset on a private dataset repo
+is a way to share a reusable index with people who cannot clone the dataset itself.
+
+The extension is a binary, not a Python package (the `sqlite-vector` name on PyPI is
+an unrelated, abandoned project). `--download` fetches the pinned build for your
+platform into `~/.cache/ontorag/`; `ONTORAG_VECTOR_EXTENSION` points at your own copy.
+`ontorag doctor` reports which. Note that SQLite derives an extension's entry point
+from its **file name**, so the file has to stay `vector.so` / `.dylib` / `.dll`.
+
 ### Publish to the Hub
 
 **Push a locally-built dataset to GitHub** so the [OntoRAG Hub](https://github.com/ontorag/hub)
