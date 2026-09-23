@@ -2,11 +2,11 @@
 explore or fork it.
 
 A dataset built by the CLI is just a directory of files (ontology/world.ttl,
-content/chunks.jsonl, …). To be usable by the Hub it needs a ``manifest.json``
-that *respects the ontorag structure* — an ``ontorag`` spec version plus an
-``ontology.graph`` pointer. This module synthesizes that manifest (inferring the
-base IRI and entity counts straight from the graph) when one isn't present, then
-commits the dataset in a single commit via the GitHub Git Data API. The caller
+content/chunks.jsonl, …). To be served by ontorag-mcp or the Hub it has to follow
+the OntoRAG dataset format (https://ontorag.org/vocab/#format): a manifest plus
+per-pack chunk files and an entity index. Unless the directory already has a
+complete manifest, this completes it (``ontorag.dataset_package``), then commits
+the dataset in a single commit via the GitHub Git Data API. The caller
 chooses whether to upload the original corpus (``content/sources/``) or only the
 derived ontology + graph.
 """
@@ -54,107 +54,18 @@ def _me(token: str) -> str:
 
 
 # ── manifest synthesis ───────────────────────────────────────────────
+# The published files and manifest are derived by ontorag.dataset_package, shared
+# with `ontorag build-dataset` and `run-stage extract`.
 
-def _split_iri(uri: str) -> Tuple[str, str]:
-    s = str(uri)
-    i = max(s.rfind("#"), s.rfind("/"))
-    return (s[:i + 1], s[i + 1:]) if i >= 0 else ("", s)
-
-
-def _infer_graph_stats(graph_path: Path) -> Tuple[str, Dict[str, int], int, Dict[str, str]]:
-    """(base_iri, by_type_local_counts, total_entities, prefixes) from the graph."""
-    import re
-    from collections import Counter
-    from rdflib import Graph, RDF, URIRef
-
-    g = Graph()
-    g.parse(str(graph_path), format="turtle")
-
-    by_type: Dict[str, int] = {}
-    subjects = set()
-    ns_counter: Counter = Counter()
-    used_ns = set()
-    for s, p, o in g:
-        for term in (s, p, o):
-            if isinstance(term, URIRef):
-                used_ns.add(_split_iri(str(term))[0])
-        if p == RDF.type and isinstance(o, URIRef):
-            _, local = _split_iri(str(o))
-            by_type[local] = by_type.get(local, 0) + 1
-            subjects.add(s)
-            ns_counter[_split_iri(str(s))[0]] += 1
-
-    base_iri = ns_counter.most_common(1)[0][0] if ns_counter else ""
-    by_type = dict(sorted(by_type.items(), key=lambda kv: -kv[1]))
-
-    # prefixes: read the turtle @prefix header directly (faithful to the dataset's
-    # own naming — rdflib rebinds/injects ~25 defaults) and keep only the ones the
-    # data actually uses
-    declared: Dict[str, str] = {}  # namespace -> prefix
-    header = graph_path.read_text(encoding="utf-8", errors="replace")
-    for m in re.finditer(r'@prefix\s+([A-Za-z][\w.\-]*)\s*:\s*<([^>]+)>\s*\.', header):
-        declared[m.group(2)] = m.group(1)
-    prefixes = {declared[ns]: ns for ns in used_ns if ns in declared}
-    prefixes = dict(sorted(prefixes.items()))
-    return base_iri, by_type, len(subjects), prefixes
+from ontorag.dataset_package import complete_dataset, infer_graph_stats as _infer_graph_stats  # noqa: E402
 
 
-def _count_lines(path: Path) -> int:
-    n = 0
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                n += 1
-    return n
-
-
-def _build_manifest(d: Path, graph_rel: str, name: str, license: str,
-                    base_iri_override: Optional[str]) -> Tuple[dict, Optional[str]]:
-    """Return (manifest, generated_prefixes_json_or_None)."""
-    graph_path = d / graph_rel
-    if not graph_path.exists():
-        raise RuntimeError(
-            f"graph not found at '{graph_rel}' — pass --graph to point at your world/instance TTL")
-
-    base_iri, by_type, entities, prefixes = _infer_graph_stats(graph_path)
-    if base_iri_override:
-        base_iri = base_iri_override
-
-    ontology = {"format": "text/turtle", "graph": graph_rel, "base_iri": base_iri,
-                "counts": {"entities": entities, "by_type": by_type}}
-    for key, rel in (("schema", "ontology/schema.ttl"),
-                     ("entity_index", "ontology/entities.jsonl")):
-        if (d / rel).exists():
-            ontology[key] = rel
-
-    # prefixes.json: reference an existing one, else emit one from the graph bindings
-    prefixes_json = None
-    if (d / "ontology/prefixes.json").exists():
-        ontology["prefixes"] = "ontology/prefixes.json"
-    elif prefixes:
-        ontology["prefixes"] = "ontology/prefixes.json"
-        prefixes_json = json.dumps(prefixes, indent=2, ensure_ascii=False) + "\n"
-
-    content: dict = {}
-    counts: Dict[str, int] = {}
-    if (d / "content/chunks.jsonl").exists():
-        content["chunks"] = "content/chunks.jsonl"
-        counts["chunks"] = _count_lines(d / "content/chunks.jsonl")
-    if (d / "content/sources.json").exists():
-        content["sources"] = "content/sources.json"
-        try:
-            srcs = json.loads((d / "content/sources.json").read_text(encoding="utf-8"))
-            counts["documents"] = len(srcs)
-        except Exception:
-            pass
-    if counts:
-        content["counts"] = counts
-
-    manifest = {"ontorag": "0.1",
-                "dataset": {"name": name, "license": license},
-                "ontology": ontology,
-                "content": content}
-    return manifest, prefixes_json
+def _is_complete(manifest: dict) -> bool:
+    """True if the manifest already has what the dataset format requires."""
+    return (manifest.get("ontorag") and (manifest.get("dataset") or {}).get("id")
+            and (manifest.get("dataset") or {}).get("version")
+            and (manifest.get("ontology") or {}).get("entity_index")
+            and (manifest.get("content") or {}).get("chunks_glob"))
 
 
 # ── file gathering ───────────────────────────────────────────────────
@@ -283,21 +194,18 @@ def push_dataset(dataset_dir: str, repo: str, token: Optional[str] = None,
     owner, repo_name = repo.split("/", 1) if "/" in repo else (me, repo)
 
     manifest_path = d / "manifest.json"
-    if manifest_path.exists() and not regen_manifest:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    existing = (json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_path.exists() else {})
+    if existing and _is_complete(existing) and not regen_manifest:
+        manifest = existing
         _log.info("using existing manifest.json")
     else:
-        manifest, prefixes_json = _build_manifest(
-            d, graph, name or repo_name, license, base_iri)
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        if prefixes_json is not None:
-            (d / "ontology").mkdir(parents=True, exist_ok=True)
-            (d / "ontology/prefixes.json").write_text(prefixes_json, encoding="utf-8")
-            _log.info("wrote ontology/prefixes.json (from graph bindings)")
+        manifest = complete_dataset(d, graph_rel=graph, name=name or (existing.get("dataset") or {}).get("name") or repo_name,
+                                    license=license or None, base_iri=base_iri)
         oc = manifest["ontology"]["counts"]
-        _log.info("wrote manifest.json (base_iri=%s, %d entities)",
-                  manifest["ontology"]["base_iri"], oc["entities"])
+        _log.info("completed dataset (base_iri=%s, %d entities, %d chunks)",
+                  manifest["ontology"]["base_iri"], oc["entities"],
+                  manifest["content"]["counts"]["chunks"])
 
     files = _gather(d, include_sources)
     if "manifest.json" not in files:

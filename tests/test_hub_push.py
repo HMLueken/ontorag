@@ -2,7 +2,7 @@
 Network (repo create / commit) is not exercised here — only the pure logic."""
 from pathlib import Path
 
-from ontorag.hub_push import _build_manifest, _gather, _infer_graph_stats
+from ontorag.hub_push import _gather, _infer_graph_stats, _is_complete
 
 
 _WORLD_TTL = """\
@@ -47,27 +47,17 @@ def test_infer_graph_stats(tmp_path):
     }
 
 
-def test_build_manifest_respects_structure(tmp_path):
-    d = _mk_dataset(tmp_path)
-    manifest, prefixes_json = _build_manifest(d, "ontology/world.ttl", "AMOL", "CC-BY-SA-4.0", None)
-    # the two things the Hub validates
-    assert manifest["ontorag"] == "0.1"
-    assert manifest["ontology"]["graph"] == "ontology/world.ttl"
-    # inferred metadata
-    assert manifest["ontology"]["base_iri"] == "https://ontorag.dev/amol/"
-    assert manifest["ontology"]["counts"]["entities"] == 3
-    assert manifest["ontology"]["counts"]["by_type"]["Character"] == 2
-    assert manifest["dataset"] == {"name": "AMOL", "license": "CC-BY-SA-4.0"}
-    assert manifest["content"]["counts"] == {"chunks": 2, "documents": 1}
-    # prefixes.json didn't exist → one is generated from the graph
-    assert manifest["ontology"]["prefixes"] == "ontology/prefixes.json"
-    assert prefixes_json is not None and "rpg" in prefixes_json
-
-
-def test_build_manifest_base_iri_override(tmp_path):
-    d = _mk_dataset(tmp_path)
-    manifest, _ = _build_manifest(d, "ontology/world.ttl", "AMOL", "", "https://example.org/x/")
-    assert manifest["ontology"]["base_iri"] == "https://example.org/x/"
+def test_only_complete_manifests_are_published_as_is():
+    """A Hub working manifest (no chunks_glob / entity_index) gets completed into the
+    dataset format before publishing; a complete one is left alone."""
+    working = {"ontorag": "0.1", "dataset": {"name": "X", "base_iri": "https://x/"},
+               "content": {"chunks": "content/chunks.jsonl"}}
+    assert not _is_complete(working)
+    complete = {"ontorag": "0.1", "dataset": {"id": "x", "name": "X", "version": "0.1.0"},
+                "ontology": {"graph": "ontology/world.ttl", "entity_index": "ontology/entities.jsonl",
+                             "base_iri": "https://x/"},
+                "content": {"chunks_glob": "content/chunks/*.jsonl"}}
+    assert _is_complete(complete)
 
 
 def test_gather_includes_corpus(tmp_path):

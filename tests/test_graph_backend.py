@@ -259,20 +259,44 @@ async def test_neo4j_backend_swaps_sparql_for_cypher(monkeypatch):
 
 # ── provenance is a backend primitive, not a caller's job ────────────
 
-def test_sparql_mentions_walks_prov(rdf_backend):
+MENTION_VARS = ["s", "quote", "source", "chunkId", "page", "section"]
+
+
+def test_sparql_mentions_walks_orp(rdf_backend):
     magus = _values(rdf_backend.list_by_class(NS + "Magus"), "s")[0]
     res = rdf_backend.mentions([magus])
-    assert res["head"]["vars"] == ["s", "quote", "source", "chunkId"]
+    assert res["head"]["vars"] == MENTION_VARS
     assert _values(res, "quote") == ["Bonisagus founded the Order."]
-    # the mcp: namespace is per-dataset, so these are matched by local name
-    assert _values(res, "source") == ["amol://core.pdf"]
+    assert _values(res, "source") == ["core"]          # the source's title
     assert _values(res, "chunkId") == ["c1"]
+
+
+_LEGACY_TTL = """\
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix mcp:  <http://amol/mcp/> .
+<http://amol/Magus/old> a <http://amol/Magus> ;
+    prov:wasDerivedFrom [ a mcp:Mention ; prov:value "An older quote." ;
+        mcp:chunkId "c9" ; mcp:sourcePath "amol://old.pdf" ; mcp:pageLabel "7" ;
+        mcp:section "History" ] .
+"""
+
+
+def test_sparql_mentions_still_reads_legacy_mcp_graphs(tmp_path):
+    onto, inst = tmp_path / "schema.ttl", tmp_path / "world.ttl"
+    onto.write_text("", encoding="utf-8")
+    inst.write_text(_LEGACY_TTL, encoding="utf-8")
+    res = LocalRdfBackend(str(onto), str(inst)).mentions(["http://amol/Magus/old"])
+    assert _values(res, "quote") == ["An older quote."]
+    assert _values(res, "source") == ["amol://old.pdf"]
+    assert _values(res, "chunkId") == ["c9"]
+    assert _values(res, "page") == ["7"]
+    assert _values(res, "section") == ["History"]
 
 
 def test_mentions_of_nothing_is_an_empty_result(rdf_backend):
     res = rdf_backend.mentions([])
     assert res["results"]["bindings"] == []
-    assert res["head"]["vars"] == ["s", "quote", "source", "chunkId"]
+    assert res["head"]["vars"] == MENTION_VARS
 
 
 def test_neo4j_mentions_uses_parameters_not_interpolation(monkeypatch):

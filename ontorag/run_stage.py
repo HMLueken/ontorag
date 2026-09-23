@@ -288,6 +288,11 @@ def extract(root: pathlib.Path, m: dict, full: bool = False) -> None:
         st = _load_state(root)
         st.setdefault("extract-instances", {})["card"] = _card_hash(root, card)
         (root / STATE_FILE).write_text(json.dumps(st, indent=2) + "\n", encoding="utf-8")
+    if (root / "ontology" / "world.ttl").exists():
+        # derive the published files (dataset format 0.1) so the result can be served
+        from ontorag.dataset_package import complete_dataset
+        complete_dataset(root)
+        m = load_manifest(root)
     save_state(root, m, "extracted")
 
 

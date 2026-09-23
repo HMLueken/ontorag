@@ -58,6 +58,14 @@ _SCHEMA_TYPES = {
 # Typed on instances but meaningless as a Neo4j label.
 _NOISE_TYPES = {"http://www.w3.org/2002/07/owl#NamedIndividual"}
 
+_ORP = "https://ontorag.org/provenance#"
+_OA = "http://www.w3.org/ns/oa#"
+_DCTERMS = "http://purl.org/dc/terms/"
+# The provenance scaffolding around orp:Mention (https://ontorag.org/provenance/):
+# where a passage lives, not facts about the world. Mentions are flattened onto
+# their (:Mention) node, so these are not projected as (:Resource) nodes.
+_PROVENANCE_TYPES = {_ORP + t for t in ("Source", "SourceFile", "Pack", "SpinePack", "Chunk")}
+
 
 # ── naming ───────────────────────────────────────────────────────────
 
@@ -110,6 +118,37 @@ def _add_prop(props: Dict[str, Any], key: str, value: Any) -> None:
 
 # ── mapping (pure — no driver, no I/O) ───────────────────────────────
 
+def _flatten_orp_mention(g: Graph, mention) -> Tuple[Dict[str, Any], List[str]]:
+    """The payload of an orp:Mention as flat properties: the quote and page/section
+    come from its target's selectors, the chunk id and source title from the nodes
+    it points at. Keys match the legacy mcp:Mention projection where one existed."""
+    t_has_target, t_has_source = URIRef(_OA + "hasTarget"), URIRef(_OA + "hasSource")
+    t_selector, t_exact = URIRef(_OA + "hasSelector"), URIRef(_OA + "exact")
+    m: Dict[str, Any] = {}
+    iris: List[str] = []
+
+    def put(key: str, value, iri: str) -> None:
+        if value is not None and key not in m:
+            m[key] = _py(value)
+            iris.append(iri)
+
+    for target in g.objects(mention, t_has_target):
+        for sel in g.objects(target, t_selector):
+            put("value", g.value(sel, t_exact), _OA + "exact")
+            put("page", g.value(sel, URIRef(_ORP + "pageStart")), _ORP + "pageStart")
+            put("pageLabel", g.value(sel, URIRef(_ORP + "pageLabel")), _ORP + "pageLabel")
+            put("section", g.value(sel, URIRef(_ORP + "sectionTitle")), _ORP + "sectionTitle")
+        file_ = g.value(target, t_has_source)
+        if file_ is not None:
+            source = g.value(file_, URIRef(_ORP + "fileOf"))
+            if source is not None:
+                put("source", g.value(source, URIRef(_DCTERMS + "title")), _DCTERMS + "title")
+    chunk = g.value(mention, URIRef(_ORP + "inChunk"))
+    if chunk is not None:
+        put("chunkId", g.value(chunk, URIRef(_DCTERMS + "identifier")), _DCTERMS + "identifier")
+    return m, iris
+
+
 def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
     """Project an rdflib instances graph into Neo4j-ready rows.
 
@@ -135,7 +174,7 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
         if subj in mention_ids or isinstance(subj, BNode):
             continue
         types = [str(t) for t in g.objects(subj, RDF.type)]
-        if not types or any(t in _SCHEMA_TYPES for t in types):
+        if not types or any(t in _SCHEMA_TYPES or t in _PROVENANCE_TYPES for t in types):
             continue
 
         iri = str(subj)
@@ -156,13 +195,16 @@ def graph_to_rows(g: Graph) -> Dict[str, List[dict]]:
                 continue
             name = local_name(p)
             if o in mention_ids:                                  # provenance
-                m, m_iris = {}, []
-                for mp, mo in g.predicate_objects(o):
-                    if mp == RDF.type:
-                        continue
-                    m[local_name(mp)] = _py(mo)
-                    m_iris.append(str(mp))
-                quote = m.pop("value", "")                        # prov:value
+                if (o, URIRef(_OA + "hasTarget"), None) in g:     # orp:Mention
+                    m, m_iris = _flatten_orp_mention(g, o)
+                else:                                             # legacy mcp:Mention
+                    m, m_iris = {}, []
+                    for mp, mo in g.predicate_objects(o):
+                        if mp == RDF.type:
+                            continue
+                        m[local_name(mp)] = _py(mo)
+                        m_iris.append(str(mp))
+                quote = m.pop("value", "")                        # the quoted passage
                 chunk_id = str(m.get("chunkId", ""))
                 if not quote:
                     continue
@@ -412,7 +454,7 @@ class Neo4jBackend(GraphBackend):
             return results_json(["s", "quote", "source", "chunkId"], [])
         rows = self._read(
             "MATCH (n:Resource)-[:DERIVED_FROM]->(m:Mention) WHERE n.iri IN $iris "
-            "RETURN n.iri AS s, m.quote AS quote, m.sourcePath AS source, "
+            "RETURN n.iri AS s, m.quote AS quote, coalesce(m.source, m.sourcePath) AS source, "
             "m.chunkId AS chunkId LIMIT $limit", iris=iris, limit=int(limit))
         return results_json(["s", "quote", "source", "chunkId"], [
             {"s": term(r["s"], "uri"), "quote": term(r["quote"]),

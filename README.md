@@ -139,7 +139,9 @@ Given a stable schema card, OntoRAG extracts **instances** from documents:
 - RDF instances typed to schema card classes
 - datatype properties as literals
 - object properties linking instances
-- every fact linked to its source chunk via PROV-style mention nodes (quote, page, section)
+- every fact linked to the passage it came from by an `orp:Mention` — a W3C Web Annotation
+  carrying the quote, the printed page and the section, following the
+  [OntoRAG Provenance Ontology](https://ontorag.org/provenance/)
 
 No hallucinated facts, no orphan triples.
 
@@ -191,7 +193,7 @@ pip install 'ontorag[docling]'      # IBM Docling, layout-aware PDF/DOCX/PPTX
 pip install 'ontorag[unstructured]' # Unstructured typed elements
 ```
 
-Core dependencies (always installed): `typer`, `requests`, `pydantic`, `rdflib`, `python-dotenv`, `fastapi`, `uvicorn`, `fastmcp`, `mcp`, `EbookLib`, `html2text`, `httpx`, `PyJWT`, `python-multipart`. Parsers (`pymupdf`, `pageindex`, `llama-index`, `docling`, `unstructured`) are **optional extras**.
+Core dependencies (always installed): `typer`, `requests`, `pydantic`, `rdflib`, `python-dotenv`, `fastapi`, `uvicorn`, `fastmcp`, `mcp`, `EbookLib`, `html2text`, `httpx`. Parsers (`pymupdf`, `pageindex`, `llama-index`, `docling`, `unstructured`) are **optional extras**.
 
 After installing, check your environment and available engines:
 
@@ -220,7 +222,7 @@ OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=~deepseek/deepseek-v4-flash-latest
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_APP_NAME=OntoRAG
-OPENROUTER_SITE_URL=https://ontorag.github.io
+OPENROUTER_SITE_URL=https://ontorag.org
 
 # Optional: only needed for load-ttl / sparql-update commands
 BLAZEGRAPH_ENDPOINT=http://localhost:9999/blazegraph/namespace/ontorag/sparql
@@ -230,7 +232,8 @@ BLAZEGRAPH_ENDPOINT=http://localhost:9999/blazegraph/namespace/ontorag/sparql
 `extract-instances`) sends the full schema card in each prompt, so a fast,
 capable model is worth it. `~deepseek/deepseek-v4-flash-latest` (the tilde `~`
 is part of the OpenRouter "latest" alias; it resolves to the newest
-`deepseek/deepseek-v4-flash`) is a good default — validated end-to-end below.
+`deepseek/deepseek-v4-flash`) is a good choice — validated end-to-end below.
+If `OPENROUTER_MODEL` is not set, the built-in fallback is `openai/gpt-4o-mini`.
 Avoid `*:free` slugs for real runs: they are frequently retired and the shared
 free router is slow enough to stall multi-chunk instance extraction.
 
@@ -395,6 +398,24 @@ ontorag extract-instances \
 
 Extracts structured instances constrained to the schema card, then converts to RDF with PROV-style provenance (quote, page, section for every fact).
 
+### Governed stages over a dataset directory
+
+`run-stage` runs the pipeline over a *dataset directory* — a `manifest.json` with
+`dataset.base_iri` (and optionally `baselines`), plus source files in
+`content/sources/`. It is the single definition shared by CI workflows, the Hub and
+the desktop app.
+
+```bash
+ontorag run-stage propose ./my-dataset   # ingest new files, propose + align, build the proposed card
+# review ontology/schema_card.proposed.json; save the approved card as ontology/schema_card.json
+ontorag run-stage extract ./my-dataset   # export schema.ttl, extract instances, complete the dataset
+```
+
+Stages are incremental: only documents not yet processed reach the model, and
+approving a different schema card triggers a full re-extraction. `--full`
+reprocesses everything. `extract` extracts against the approved card when there is
+one, else the proposed card, and finishes with `build-dataset`.
+
 ### Knowledge graph commands
 
 **Upload TTL to Blazegraph:**
@@ -425,7 +446,7 @@ RDF-shaped, so the result is pleasant to query in Cypher:
 | datatype property | node property |
 | object property | `-[:MEMBER_OF]->` (relationship) |
 | object property to an external IRI | node property holding the IRI |
-| `prov:wasDerivedFrom` -> `mcp:Mention` | `-[:DERIVED_FROM]->(:Mention {quote, chunkId, ...})` |
+| `orp:hasMention` -> `orp:Mention` | `-[:DERIVED_FROM]->(:Mention {quote, chunkId, source, page, section})` |
 
 Re-running is idempotent: instances MERGE on their stable IRI, and mentions (blank
 nodes in RDF, so identity-less) MERGE on a key minted from instance + chunk + quote.
@@ -519,11 +540,23 @@ from its **file name**, so the file has to stay `vector.so` / `.dylib` / `.dll`.
 
 ### Publish to the Hub
 
-**Push a locally-built dataset to GitHub** so the [OntoRAG Hub](https://github.com/ontorag/hub)
-can explore or fork it. It synthesizes a Hub-compatible `manifest.json` (the
-`ontorag` spec version + an `ontology.graph` pointer + entity counts, inferred
-straight from the graph) when the directory doesn't already have one, then
-commits the dataset in one commit via the GitHub API. Auth is a GitHub token
+**Complete a dataset directory into the published format.** Services such as
+[ontorag-mcp](https://github.com/ontorag/ontorag-mcp) read datasets in the
+[OntoRAG dataset format](https://ontorag.org/vocab/#format): a `manifest.json`,
+per-source chunk files (`content/chunks/<source>.jsonl`), an entity index
+(`ontology/entities.jsonl`) and source/pack registries. `build-dataset` derives
+them from the pipeline's working files and merges the required fields into an
+existing manifest without dropping any keys. `run-stage extract` runs it
+automatically.
+
+```bash
+ontorag build-dataset ./my-dataset --name "My rules" --license CC-BY-4.0
+```
+
+**Push a locally-built dataset to GitHub** so ontorag-mcp (and the
+[OntoRAG Hub](https://ontorag.org/tools/#hub), in development) can serve it.
+Unless the directory already has a complete manifest, it is first completed as
+above; the dataset is then committed in one commit via the GitHub API. Auth is a GitHub token
 with `repo` scope, via `--token` or `GITHUB_TOKEN` / `GH_TOKEN`.
 
 ```bash
@@ -566,8 +599,9 @@ offered a tool that has to fail. Cypher runs in a read transaction, so the serve
 itself rejects writes.
 
 `describe` against Neo4j rebuilds RDF from the projection, and the provenance walk
-survives the round trip intact -- predicates come back as `prov:wasDerivedFrom` /
-`prov:value` / `mcp:chunkId`, not as invented IRIs.
+survives the round trip -- the mention hangs off `orp:hasMention` and its payload
+keeps the predicate IRIs it was recorded with, not invented ones. `mentions`
+also reads graphs written before `orp:` (the per-dataset `mcp:Mention` model).
 
 ---
 
@@ -705,9 +739,12 @@ Origin is set when an item first enters the schema card and is preserved across 
 ```
 ontorag/
   __init__.py
-  cli.py                            # Typer CLI (15 commands, incl. doctor and hub push)
+  cli.py                            # Typer CLI (19 commands, incl. doctor, build-dataset and hub push)
   llm_config.py                     # OpenRouter settings resolver (CLI flag > env > default)
-  hub_push.py                       # publish a dataset to GitHub for the Hub (manifest synth + Git Data API)
+  hub_push.py                       # publish a dataset to GitHub (Git Data API)
+  dataset_package.py                # complete a dataset directory into the dataset format (build-dataset)
+  sources.py                        # source/pack naming shared by the graph writer and the packager
+  run_stage.py                      # governed stages over a dataset directory (run-stage propose|extract)
   parallel.py                       # bounded-concurrency chunk processing (--concurrency)
   card_slim.py                      # opt-in per-chunk schema-card pruning (--slim-card)
   dto.py                            # DocumentDTO, ChunkDTO, ProvenanceDTO + content hashing

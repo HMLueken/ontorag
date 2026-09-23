@@ -739,7 +739,7 @@ def cmd_init_schema_card(
     Create an initial schema card by composing one or more baseline ontologies.
 
     Baselines are resolved first from the local catalog, then from the remote
-    REST API at ONTORAG_MCP_URL (default: https://mcp.rpg-schema.org).
+    REST API at ONTORAG_MCP_URL (default: https://mcp.rpg-schema.org/mcp; the /mcp suffix is optional).
 
     Each class/property carries an 'origin' field tracking its source.
     """
@@ -798,6 +798,39 @@ def cmd_doctor():
 
 
 # -------------------------
+# Dataset format
+# -------------------------
+
+@app.command("build-dataset")
+def cmd_build_dataset(
+    dataset_dir: str = typer.Argument(".", help="Dataset directory (contains ontology/ and content/)."),
+    graph: str = typer.Option("ontology/world.ttl", "--graph", help="Path (relative to the dataset dir) to the world/instance graph."),
+    name: Optional[str] = typer.Option(None, "--name", help="Dataset title (default: kept from the manifest, else the directory name)."),
+    license: Optional[str] = typer.Option(None, "--license", help="SPDX licence of the content, e.g. CC-BY-SA-4.0."),
+    base_iri: Optional[str] = typer.Option(None, "--base-iri", help="Base IRI (default: kept from the manifest, else inferred from the graph)."),
+    version: Optional[str] = typer.Option(None, "--version", help="Dataset content version (default: kept, else 0.1.0)."),
+):
+    """
+    Complete a dataset directory into the OntoRAG dataset format 0.1
+    (https://ontorag.org/vocab/#format), so ontorag-mcp and other consumers can
+    serve it: per-source chunk files, the entity index, the source and pack
+    registries, and the required manifest fields. Existing manifest keys are kept.
+    """
+    from ontorag.dataset_package import complete_dataset
+
+    try:
+        m = complete_dataset(dataset_dir, graph_rel=graph, name=name, license=license,
+                             base_iri=base_iri, version=version)
+    except RuntimeError as e:
+        typer.secho(f"ERROR build-dataset: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    c = m["content"]["counts"]
+    typer.echo(f"dataset {m['dataset']['id']} {m['dataset']['version']}: "
+               f"{m['ontology']['counts']['entities']} entities, {c['chunks']} chunks, "
+               f"{c['documents']} source(s)")
+
+
+# -------------------------
 # Hub (publish to GitHub)
 # -------------------------
 
@@ -824,9 +857,9 @@ def cmd_hub_push(
     """
     Publish a locally-built dataset to GitHub so the Hub can explore or fork it.
 
-    Synthesizes a Hub-compatible manifest.json (ontorag spec + ontology.graph +
-    entity counts, inferred from the graph) when the directory doesn't already
-    have one, then commits the dataset via the GitHub API. Choose whether to
+    Unless the directory already has a complete manifest, first completes it into
+    the OntoRAG dataset format (as `ontorag build-dataset` does), then commits the
+    dataset via the GitHub API. Choose whether to
     upload the raw corpus (--include-sources, default) or only the derived
     ontology + graph (--no-include-sources).
     """

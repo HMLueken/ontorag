@@ -31,6 +31,9 @@ _log = get_logger("ontorag.mcp_backend")
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 PROV_DERIVED_FROM = "http://www.w3.org/ns/prov#wasDerivedFrom"
 PROV_VALUE = "http://www.w3.org/ns/prov#value"
+ORP = "https://ontorag.org/provenance#"
+OA = "http://www.w3.org/ns/oa#"
+DCTERMS = "http://purl.org/dc/terms/"
 
 
 # ── SPARQL Results JSON helpers (the shared wire format) ─────────────
@@ -75,12 +78,13 @@ class GraphBackend(ABC):
     @abstractmethod
     def mentions(self, iris: Sequence[str], limit: int = 8) -> Dict[str, Any]:
         """Provenance for the given instances, as SPARQL Results JSON
-        (?s ?quote ?source ?chunkId).
+        (?s ?quote ?source ?chunkId ?page ?section).
 
         This is the "answers with receipts" primitive: every extracted fact links
         back to the passage it came from. It lives on the backend because the
-        `mcp:Mention` model is ontorag's, and because a consumer should not have to
-        know whether it is walking RDF or an LPG to get a citation.
+        mention model is ontorag's (orp:Mention, https://ontorag.org/provenance/),
+        and because a consumer should not have to know whether it is walking RDF or
+        an LPG to get a citation. ?page is the printed page label when known.
         """
 
 
@@ -117,17 +121,30 @@ class SparqlBackend(GraphBackend):
 
     def mentions(self, iris: Sequence[str], limit: int = 8) -> Dict[str, Any]:
         if not iris:
-            return results_json(["s", "quote", "source", "chunkId"], [])
+            return results_json(["s", "quote", "source", "chunkId", "page", "section"], [])
         values = " ".join(f"<{i}>" for i in iris)
-        # sourcePath/chunkId live in a per-dataset `mcp:` namespace derived from the
-        # base IRI, so match them by local name rather than hardcoding a prefix
+        # Current graphs use orp:Mention (a Web Annotation targeting the passage).
+        # Graphs written before it used a per-dataset `mcp:` namespace derived from
+        # the base IRI, matched by local name so both keep answering.
         return self.select(
-            f"SELECT ?s ?quote ?source ?chunkId WHERE {{\n"
+            f"SELECT ?s ?quote ?source ?chunkId ?page ?section WHERE {{\n"
             f"  VALUES ?s {{ {values} }}\n"
-            f"  ?s <{PROV_DERIVED_FROM}> ?m .\n"
-            f"  ?m <{PROV_VALUE}> ?quote .\n"
-            f'  OPTIONAL {{ ?m ?sp ?source . FILTER(STRENDS(STR(?sp), "sourcePath")) }}\n'
-            f'  OPTIONAL {{ ?m ?cp ?chunkId . FILTER(STRENDS(STR(?cp), "chunkId")) }}\n'
+            f"  {{\n"
+            f"    ?s <{ORP}hasMention> ?m .\n"
+            f"    ?m <{OA}hasTarget> ?t .\n"
+            f"    ?t <{OA}hasSelector> ?qs . ?qs <{OA}exact> ?quote .\n"
+            f"    OPTIONAL {{ ?t <{OA}hasSource>/<{ORP}fileOf>/<{DCTERMS}title> ?source }}\n"
+            f"    OPTIONAL {{ ?m <{ORP}inChunk>/<{DCTERMS}identifier> ?chunkId }}\n"
+            f"    OPTIONAL {{ ?t <{OA}hasSelector>/<{ORP}pageLabel> ?page }}\n"
+            f"    OPTIONAL {{ ?t <{OA}hasSelector>/<{ORP}sectionTitle> ?section }}\n"
+            f"  }} UNION {{\n"
+            f"    ?s <{PROV_DERIVED_FROM}> ?m .\n"
+            f"    ?m <{PROV_VALUE}> ?quote .\n"
+            f'    OPTIONAL {{ ?m ?sp ?source . FILTER(STRENDS(STR(?sp), "sourcePath")) }}\n'
+            f'    OPTIONAL {{ ?m ?cp ?chunkId . FILTER(STRENDS(STR(?cp), "chunkId")) }}\n'
+            f'    OPTIONAL {{ ?m ?pp ?page . FILTER(STRENDS(STR(?pp), "pageLabel")) }}\n'
+            f'    OPTIONAL {{ ?m ?xp ?section . FILTER(STRENDS(STR(?xp), "/section")) }}\n'
+            f"  }}\n"
             f"}} LIMIT {int(limit)}"
         )
 

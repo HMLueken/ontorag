@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ontorag.org/vocab/dataset/0.1/embedding.schema.json",
+  "title": "OntoRAG embedding record",
+  "description": "One line of an embeddings/vectors/*.jsonl file. Joined to a chunk by `id`. Vector dimensionality, provider and metric are declared once in embeddings/config.json and the manifest.",
+  "type": "object",
+  "required": [
+    "id",
+    "vector"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Chunk id this vector belongs to (== chunk.id)."
+    },
+    "vector": {
+      "type": "array",
+      "description": "The embedding. Length MUST equal manifest.embeddings.dim. Stored as JSON numbers; values are L2-normalized when manifest.embeddings.normalized is true.",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 1
+    }
+  }
+}

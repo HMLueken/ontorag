@@ -2,14 +2,22 @@ from __future__ import annotations
 import hashlib
 from typing import Dict, Any, List, Optional
 
-from rdflib import Graph, Namespace, URIRef, BNode, Literal
-from rdflib.namespace import RDF, RDFS, XSD
+from urllib.parse import quote as _quote
 
+from rdflib import Graph, Namespace, URIRef, BNode, Literal
+from rdflib.namespace import DCTERMS, RDF, RDFS, XSD
+
+from ontorag.sources import doc_slug, doc_title, file_sha256
 from ontorag.verbosity import get_logger
 
 _log = get_logger("ontorag.instances_to_ttl")
 
 PROV = Namespace("http://www.w3.org/ns/prov#")
+# Provenance follows the OntoRAG Provenance and Citation Ontology
+# (https://ontorag.org/provenance/): a mention is a Web Annotation whose target
+# locates the quoted passage in a source file.
+ORP = Namespace("https://ontorag.org/provenance#")
+OA = Namespace("http://www.w3.org/ns/oa#")
 
 def _slug(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isalnum() or ch in ("_","-")).strip("_-")
@@ -27,12 +35,14 @@ def instance_proposals_to_graph(
     _log.info("Converting %d proposals to RDF (namespace=%s)", len(proposals), namespace)
 
     BIZ = Namespace(namespace)
-    MCP = Namespace(namespace + "mcp/")
     g = Graph()
     g.bind("biz", BIZ)
     g.bind("prov", PROV)
     g.bind("rdfs", RDFS)
-    g.bind("mcp", MCP)
+    g.bind("orp", ORP)
+    g.bind("oa", OA)
+    g.bind("dcterms", DCTERMS)
+    described: set = set()      # sources/files/packs/chunks already in the graph
 
     instance_count = 0
     for cp in proposals:
@@ -81,29 +91,90 @@ def instance_proposals_to_graph(
 
                 g.add((s, URIRef(f"{namespace}{pred}"), t))
 
-            # provenance / mention nodes
-            for m in inst.get("mentions", []) or []:
-                quote = (m.get("quote") or "").strip()
-                if not quote:
-                    continue
-
-                mn = BNode()
-                g.add((mn, RDF.type, MCP.Mention))
-                g.add((mn, PROV.value, Literal(quote)))
-                g.add((mn, MCP.chunkId, Literal(chunk_id)))
-
-                # best-effort provenance fields
-                if prov.get("source_path"):
-                    g.add((mn, MCP.sourcePath, Literal(prov["source_path"])))
-                if prov.get("page") is not None:
-                    g.add((mn, MCP.page, Literal(int(prov["page"]), datatype=XSD.integer)))
-                if prov.get("page_label"):
-                    g.add((mn, MCP.pageLabel, Literal(str(prov["page_label"]))))
-                if prov.get("section"):
-                    g.add((mn, MCP.section, Literal(str(prov["section"]))))
-
-                # link instance -> mention
-                g.add((s, PROV.wasDerivedFrom, mn))
+            # provenance: one orp:Mention per quoted passage
+            mentions = [q for q in ((m.get("quote") or "").strip()
+                                    for m in (inst.get("mentions") or [])) if q]
+            if mentions:
+                source, file_, chunk = _describe_origin(g, namespace, chunk, chunk_id, described)
+                g.add((s, ORP.attestedIn, source))
+                for quote in mentions:
+                    _add_mention(g, namespace, s, quote, file_, chunk, prov)
 
     _log.info("Instance graph built: %d instances, %d triples", instance_count, len(g))
     return g
+
+
+def _describe_origin(g: Graph, ns: str, chunk: Dict[str, Any], chunk_id: str,
+                     described: set):
+    """Add (once) the source, file, pack and chunk a passage comes from, and return
+    (source, file, chunk) IRIs. One pack per source document, as in the dataset
+    format, so a dataset can be scoped per document."""
+    prov = chunk.get("provenance") or {}
+    source_path = prov.get("source_path")
+    document_id = chunk.get("document_id") or chunk_id.split("#", 1)[0]
+    slug = doc_slug(source_path, document_id)
+
+    source = URIRef(f"{ns}source/{slug}")
+    file_ = URIRef(f"{ns}file/{document_id}")
+    pack = URIRef(f"{ns}pack/{slug}")
+    chunk_node = URIRef(f"{ns}chunk/{_quote(chunk_id, safe='')}")
+
+    if slug not in described:
+        described.add(slug)
+        g.add((source, RDF.type, ORP.Source))
+        g.add((source, DCTERMS.title, Literal(doc_title(source_path))))
+        g.add((source, DCTERMS.identifier, Literal(slug)))
+        g.add((file_, RDF.type, ORP.SourceFile))
+        g.add((file_, ORP.fileOf, source))
+        digest = file_sha256(source_path)
+        if digest:
+            g.add((file_, ORP.checksum, Literal(f"sha256:{digest}")))
+        if prov.get("source_mime"):
+            g.add((file_, DCTERMS["format"], Literal(prov["source_mime"])))
+        g.add((pack, RDF.type, ORP.Pack))
+        g.add((pack, ORP.packOf, source))
+        g.add((pack, ORP.namedGraph, URIRef(f"{ns}graph/{slug}")))
+
+    if chunk_id not in described:
+        described.add(chunk_id)
+        g.add((chunk_node, RDF.type, ORP.Chunk))
+        g.add((chunk_node, DCTERMS.identifier, Literal(chunk_id)))
+        g.add((chunk_node, ORP.inPack, pack))
+        g.add((chunk_node, OA.hasSource, file_))
+    return source, file_, chunk_node
+
+
+def _add_mention(g: Graph, ns: str, instance: URIRef, quote: str, file_: URIRef,
+                 chunk: URIRef, prov: Dict[str, Any]) -> None:
+    key = hashlib.sha1(f"{instance}|{chunk}|{quote}".encode("utf-8")).hexdigest()[:16]
+    mention = URIRef(f"{ns}mention/{key}")
+    g.add((mention, RDF.type, ORP.Mention))
+    g.add((mention, ORP.mentions, instance))
+    g.add((mention, OA.motivatedBy, OA.identifying))
+    g.add((mention, ORP.inChunk, chunk))
+    g.add((instance, ORP.hasMention, mention))
+
+    target = BNode()
+    g.add((mention, OA.hasTarget, target))
+    g.add((target, RDF.type, OA.SpecificResource))
+    g.add((target, OA.hasSource, file_))
+
+    sel = BNode()
+    g.add((target, OA.hasSelector, sel))
+    g.add((sel, RDF.type, OA.TextQuoteSelector))
+    g.add((sel, OA.exact, Literal(quote)))
+
+    page = prov.get("page")
+    if isinstance(page, int) and page >= 1:
+        sel = BNode()
+        g.add((target, OA.hasSelector, sel))
+        g.add((sel, RDF.type, ORP.PageSelector))
+        g.add((sel, ORP.pageStart, Literal(page, datatype=XSD.integer)))
+        if prov.get("page_label"):
+            g.add((sel, ORP.pageLabel, Literal(str(prov["page_label"]))))
+
+    if prov.get("section"):
+        sel = BNode()
+        g.add((target, OA.hasSelector, sel))
+        g.add((sel, RDF.type, ORP.SectionSelector))
+        g.add((sel, ORP.sectionTitle, Literal(str(prov["section"]))))

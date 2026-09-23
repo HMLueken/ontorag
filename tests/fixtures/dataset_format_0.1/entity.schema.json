@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ontorag.org/vocab/dataset/0.1/entity.schema.json",
+  "title": "OntoRAG entity index record",
+  "description": "One line of ontology/entities.jsonl. A flattened projection of the RDF graph for fast loading and for chunk↔entity linking, without requiring a SPARQL engine. The graph (ontology/world.ttl) remains the source of truth.",
+  "type": "object",
+  "required": [
+    "iri",
+    "types",
+    "label"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "iri": {
+      "type": "string",
+      "format": "uri",
+      "description": "Entity IRI."
+    },
+    "types": {
+      "type": "array",
+      "description": "rdf:type IRIs (e.g., the rpg-schema class).",
+      "items": {
+        "type": "string",
+        "format": "uri"
+      }
+    },
+    "label": {
+      "type": "string",
+      "description": "Primary human label."
+    },
+    "aliases": {
+      "type": "array",
+      "description": "Alternative surface forms used to detect mentions of this entity in chunk text.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short description for grounding / display."
+    },
+    "tags": {
+      "type": "array",
+      "description": "Labels of rpg:hasTag groupings (e.g., 'Hermetic House', 'Technique').",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attestedIn": {
+      "type": "array",
+      "description": "Book slugs whose prose mentions this entity (derived from chunk↔entity links). The entity's footprint across the corpus; enables reconstructing 'the world as known from book subset S'. Empty if no ingested book mentions it.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "definedIn": {
+      "type": "array",
+      "description": "Book slug(s) this entity was extracted/defined from (from the extraction shard's `evidence` chunks). The entity's origin, distinct from mere mention; empty for hand-curated spine entities.",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

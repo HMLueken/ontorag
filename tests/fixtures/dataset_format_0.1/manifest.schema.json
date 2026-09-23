@@ -1,0 +1,336 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ontorag.org/vocab/dataset/0.1/manifest.schema.json",
+  "title": "OntoRAG dataset manifest",
+  "description": "Root contract a service reads to connect to a GitHub-as-storage OntoRAG dataset. All paths are POSIX, relative to the repository root.",
+  "type": "object",
+  "required": [
+    "ontorag",
+    "dataset",
+    "ontology",
+    "content"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "ontorag": {
+      "type": "string",
+      "description": "Spec version this manifest conforms to (semver-ish).",
+      "examples": [
+        "0.1"
+      ]
+    },
+    "dataset": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Short stable dataset id, e.g. 'amol'."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable dataset name."
+        },
+        "version": {
+          "type": "string",
+          "description": "Dataset content version (bump when chunks/embeddings change)."
+        },
+        "license": {
+          "type": "string",
+          "examples": [
+            "CC-BY-SA-4.0"
+          ],
+          "description": "SPDX identifier of the licence the content is distributed under, e.g. CC-BY-SA-4.0."
+        },
+        "source_repo": {
+          "type": "string",
+          "format": "uri",
+          "description": "Where the source documents come from (URL)."
+        },
+        "built_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of the build."
+        },
+        "builder": {
+          "type": "string",
+          "description": "Tool + version that produced this dataset."
+        }
+      },
+      "description": "Identity, version and licence of the dataset."
+    },
+    "ontology": {
+      "type": "object",
+      "required": [
+        "graph",
+        "entity_index",
+        "base_iri"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "examples": [
+            "text/turtle"
+          ],
+          "description": "Media type of the graph file, e.g. text/turtle."
+        },
+        "graph": {
+          "type": "string",
+          "description": "Path to the RDF graph (loadable into Oxigraph/rdflib)."
+        },
+        "entity_index": {
+          "type": "string",
+          "description": "Path to the flat NDJSON entity index derived from the graph."
+        },
+        "prefixes": {
+          "type": "string",
+          "description": "Path to a JSON map of prefix -> namespace used by the graph."
+        },
+        "base_iri": {
+          "type": "string",
+          "format": "uri",
+          "description": "Namespace under which the dataset mints its entity IRIs. Should be dereferenceable."
+        },
+        "aligns_with": {
+          "type": "array",
+          "description": "External ontologies this graph aligns to (e.g., rpg-schema catalog slugs).",
+          "items": {
+            "type": "object",
+            "required": [
+              "slug"
+            ],
+            "properties": {
+              "slug": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "examples": [
+                  "schema",
+                  "upper",
+                  "vocabulary"
+                ]
+              }
+            }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "entities": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "by_type": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          },
+          "description": "Entity counts, overall and by type (informative)."
+        }
+      },
+      "description": "The knowledge graph: where it is, how it is keyed, and what it aligns to."
+    },
+    "content": {
+      "type": "object",
+      "required": [
+        "chunks_glob"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "examples": [
+            "application/x-ndjson"
+          ],
+          "description": "Media type of chunk files: application/x-ndjson."
+        },
+        "chunks_glob": {
+          "type": "string",
+          "description": "Glob (relative to root) matching per-document chunk NDJSON files."
+        },
+        "sources": {
+          "type": "string",
+          "description": "Path to source/provenance manifest."
+        },
+        "chunking": {
+          "type": "object",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "examples": [
+                "heading+window"
+              ]
+            },
+            "target_tokens": {
+              "type": "integer"
+            },
+            "overlap_tokens": {
+              "type": "integer"
+            },
+            "token_heuristic": {
+              "type": "string"
+            }
+          },
+          "description": "How documents were split: strategy, target size and overlap (informative)."
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "documents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "chunks": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "description": "Document and chunk counts (informative)."
+        }
+      },
+      "description": "The retrievable text: chunk files and the sources they come from."
+    },
+    "embeddings": {
+      "type": "object",
+      "required": [
+        "vectors_glob",
+        "dim",
+        "metric"
+      ],
+      "properties": {
+        "config": {
+          "type": "string",
+          "description": "Path to the embedding configuration file."
+        },
+        "vectors_glob": {
+          "type": "string",
+          "description": "Glob matching per-document vector NDJSON files, aligned to chunks by id."
+        },
+        "provider": {
+          "type": "string",
+          "examples": [
+            "ollama",
+            "voyage",
+            "openai",
+            "sentence-transformers",
+            "hashed"
+          ],
+          "description": "Embedding provider used at build time, e.g. ollama. Consumers must embed queries with the same provider and model."
+        },
+        "model": {
+          "type": "string",
+          "description": "Embedding model identifier, e.g. nomic-embed-text."
+        },
+        "dim": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Vector length. Every embedding record must have exactly this many numbers."
+        },
+        "metric": {
+          "type": "string",
+          "enum": [
+            "cosine",
+            "dot",
+            "euclidean"
+          ],
+          "description": "Similarity metric, e.g. cosine."
+        },
+        "normalized": {
+          "type": "boolean",
+          "description": "True if vectors are L2-normalized (so dot == cosine)."
+        },
+        "alignment": {
+          "type": "string",
+          "examples": [
+            "by_id"
+          ],
+          "description": "How vector records map to chunks."
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "vectors": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "description": "Vector counts (informative)."
+        }
+      },
+      "description": "Dense vectors for the chunks, and how to embed queries compatibly. Optional: without it, consumers can still retrieve through the ontology and keywords, but not by vector similarity."
+    },
+    "schema": {
+      "type": "object",
+      "description": "Paths to the JSON Schemas describing each record type.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "composition": {
+      "type": "object",
+      "description": "The pack composition model: how the dataset decomposes into a spine plus per-source packs linked by a dependency DAG. Selection rules (access scope vs. composition) are defined by the OntoRAG Provenance Ontology: https://ontorag.org/provenance/#packs",
+      "properties": {
+        "model": {
+          "type": "string",
+          "examples": [
+            "packs"
+          ],
+          "description": "Composition model name: \"packs\"."
+        },
+        "version": {
+          "type": "string",
+          "description": "Version of the composition model."
+        },
+        "unit": {
+          "type": "string",
+          "description": "What a pack corresponds to.",
+          "examples": [
+            "sourcebook"
+          ]
+        },
+        "registry": {
+          "type": "string",
+          "description": "Path to the pack registry (id -> {title, path, requires})."
+        },
+        "dependency": {
+          "type": "string",
+          "description": "Predicate forming the pack dependency DAG (orp:requires between packs; dcterms:requires between their sources).",
+          "examples": [
+            "dc:requires"
+          ]
+        },
+        "core": {
+          "type": "array",
+          "description": "Root packs (require nothing).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "type": "string",
+          "description": "The composition/scoping rule."
+        },
+        "tool": {
+          "type": "string",
+          "description": "Tool that validates and composes packs (informative)."
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "packs": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "description": "Pack counts (informative)."
+        }
+      }
+    }
+  }
+}

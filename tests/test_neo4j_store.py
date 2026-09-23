@@ -83,13 +83,20 @@ def test_mention_carries_the_citation_payload(rows):
     m = rows["mentions"][0]["props"]
     assert m["quote"] == "Bonisagus founded the Order."
     assert m["chunkId"] == "c1"
-    assert m["sourcePath"] == "amol://core.pdf"
+    assert m["source"] == "core"                # the source's title
     assert m["page"] == 12                      # xsd:integer survives as an int
     assert m["section"] == "Magi"
     # attached to the instance it was derived from, via a real predicate IRI so
-    # outgoing()/describe() report prov:wasDerivedFrom rather than "DERIVED_FROM"
+    # outgoing()/describe() report orp:hasMention rather than "DERIVED_FROM"
     assert rows["mentions"][0]["iri"].startswith("http://amol/Magus/")
-    assert rows["mentions"][0]["pred"] == "http://www.w3.org/ns/prov#wasDerivedFrom"
+    assert rows["mentions"][0]["pred"] == "https://ontorag.org/provenance#hasMention"
+
+
+def test_provenance_scaffolding_is_not_projected_as_resources(rows):
+    """Sources, files, packs and chunks describe where a passage lives; they are
+    flattened onto the mention, not projected as (:Resource) nodes."""
+    kinds = {c for n in rows["nodes"] for c in n["class_iris"]}
+    assert not any(k.startswith("https://ontorag.org/provenance#") for k in kinds)
 
 
 def test_reimport_is_idempotent(rows):

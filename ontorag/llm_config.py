@@ -16,7 +16,7 @@ _DEFAULTS = {
     "OPENROUTER_MODEL": "openai/gpt-4o-mini",
     "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
     "OPENROUTER_APP_NAME": "OntoRAG",
-    "OPENROUTER_SITE_URL": "https://ontorag.github.io",
+    "OPENROUTER_SITE_URL": "https://ontorag.org",
     # OPENROUTER_API_KEY has no default — it must come from env or --api-key.
 }
 
