@@ -61,7 +61,11 @@ def test_propose_assembly(tmp_path, calls):
 
     assert any("register-ontology rpg ontology/baselines/rpg.ttl" in c for c in calls)
     assert any("init-schema-card --baselines rpg" in c for c in calls)
-    assert any(c.startswith("ingest content/sources/a.md") for c in calls)
+    # one call for the directory, not one per file: a 5,000-document corpus paid
+    # ~0.5s of interpreter start per document otherwise
+    assert any(c.startswith("ingest content/sources ") or c == "ingest content/sources"
+               for c in calls)
+    assert not any("ingest content/sources/a.md" in c for c in calls)
     es = next(c for c in calls if "extract-schema" in c)
     # induction runs over the pending set, not the whole corpus
     assert "--chunks content/chunks.pending.jsonl" in es
@@ -183,3 +187,31 @@ def test_a_changed_schema_card_forces_a_full_instance_pass(tmp_path):
     (tmp_path / card).write_text('{"classes": [{"name": "Magus"}]}', encoding="utf-8")
     assert run_stage._card_changed(tmp_path, card), \
         "a graph half-extracted against one model and half another is worse than a re-run"
+
+
+def test_no_baselines_means_no_alignment_and_a_real_card(tmp_path, calls):
+    """A dataset without baselines used to end up with an empty schema card: the
+    card was built from an alignment that had nothing to align against."""
+    m = _setup(tmp_path)
+    m["baselines"] = []
+    (tmp_path / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+
+    run_stage.propose(tmp_path, m)
+
+    assert not any("align-schema" in c for c in calls), "nothing to align against"
+    card = next(c for c in calls if "build-schema-card" in c)
+    assert "--proposal ontology/proposal.json" in card, card
+    assert "--proposal ontology/alignment.json" not in card
+
+    calls.clear()
+    run_stage.extract(tmp_path, m)
+    ttl = next(c for c in calls if "export-schema-ttl" in c)
+    assert "--proposal ontology/proposal.json" in ttl, ttl
+
+
+def test_baselines_still_go_through_alignment(tmp_path, calls):
+    m = _setup(tmp_path)
+    run_stage.propose(tmp_path, m)
+    assert any("align-schema" in c for c in calls)
+    card = next(c for c in calls if "build-schema-card" in c)
+    assert "--proposal ontology/alignment.json" in card, card

@@ -94,7 +94,12 @@ def read_jsonl(path: str) -> List[dict]:
             line = line.strip()
             if not line:
                 continue
-            out.append(json.loads(line))
+            rec = json.loads(line)
+            if rec is None:
+                # `null` lines exist in raw-proposal stores written before failed
+                # chunks were dropped; reading them back would re-poison the run
+                continue
+            out.append(rec)
     _log.debug("Read %d records from %s", len(out), path)
     return out
 
@@ -110,7 +115,7 @@ def write_text(path: str, text: str) -> None:
 
 @app.command("ingest")
 def cmd_ingest(
-    file: str = typer.Argument(..., help="Path to the input file (pdf/docx/md/html/csv/epub/...)"),
+    file: str = typer.Argument(..., help="Input file, or a directory to ingest every file in"),
     out: str = typer.Option("./data/dto", help="Output folder for DTO store"),
     mime: Optional[str] = typer.Option(None, help="Optional MIME type override"),
     force: bool = typer.Option(False, "--force", "-f", help="Re-ingest even if the file was already processed"),
@@ -139,6 +144,29 @@ def cmd_ingest(
     if engine not in ENGINES:
         raise typer.BadParameter(
             f"unknown engine {engine!r}. Choose from: {', '.join(ENGINES)}.", param_hint="--engine")
+
+    # A directory is ingested in this process, one file at a time. The caller could
+    # loop the command instead -- and did -- but then every document pays a fresh
+    # interpreter and import of rdflib and friends: about 0.5s each, which is 48
+    # minutes of pure overhead on a 5,000-document corpus and nothing else.
+    if Path(file).is_dir():
+        files = sorted(p for p in Path(file).iterdir() if p.is_file() and not p.name.startswith("."))
+        if not files:
+            raise typer.BadParameter(f"{file} contains no files", param_hint="FILE")
+        done = skipped = chunks = 0
+        for f in files:
+            doc_id = stable_document_id(str(f))
+            if (Path(out) / "documents" / f"{doc_id}.json").exists() and not force:
+                skipped += 1
+                continue
+            doc = extract_document(str(f), mime=mime, engine=engine)
+            store_document_jsonl(doc, out)
+            chunks += len(doc.chunks)
+            done += 1
+        typer.echo(f"OK ingest: {done} document(s), {chunks} chunk(s), {skipped} already "
+                   f"ingested, engine={engine} out={out}")
+        return
+
     doc_id = stable_document_id(file)
     content_hash = hash_file(file)
     _log.info("File %s -> doc_id=%s content_hash=%s engine=%s", file, doc_id, content_hash[:12], engine)
@@ -200,8 +228,36 @@ def cmd_extract_schema(
             f"(cumulative: {totals['classes']}C {totals['dt_props']}D {totals['obj_props']}O {totals['warnings']}W)"
         )
 
+    # The raw store is written as chunks land, not after the loop.
+    #
+    # Induction over a large corpus is hours of paid LLM calls, and this step used
+    # to hold every proposal in memory until the end: one exception after the last
+    # chunk -- which is exactly what a `None` from a failed chunk used to cause --
+    # threw away the whole run's work and its cost. Appending per chunk means a
+    # crash loses the chunk, not the corpus.
+    previous: List[dict] = []
+    if raw_in and Path(raw_in).is_file():
+        previous = read_jsonl(raw_in)
+        typer.echo(f"  {len(previous)} proposal(s) kept from previous runs")
+
+    raw_fh = None
+    if raw_out:
+        Path(raw_out).parent.mkdir(parents=True, exist_ok=True)
+        raw_fh = open(raw_out, "a", encoding="utf-8")
+
+    def _checkpoint(idx: int, total_: int, chunk_id: str, data: dict) -> None:
+        _on_chunk(idx, total_, chunk_id, data)
+        if raw_fh is not None:
+            raw_fh.write(json.dumps(data, ensure_ascii=False) + "\n")
+            raw_fh.flush()
+
     # 1) per-chunk proposals (LLM)
-    chunk_proposals = extract_schema_chunk_proposals(chunks_list, card, on_chunk_done=_on_chunk)
+    try:
+        chunk_proposals = extract_schema_chunk_proposals(
+            chunks_list, card, on_chunk_done=_checkpoint)
+    finally:
+        if raw_fh is not None:
+            raw_fh.close()
 
     # 2) aggregate document-level
     #
@@ -210,19 +266,27 @@ def cmd_extract_schema(
     # everything ever proposed keeps one code path and one meaning of "the
     # proposal", whether or not this run was incremental.
     if raw_out:
-        Path(raw_out).parent.mkdir(parents=True, exist_ok=True)
-        with open(raw_out, "a", encoding="utf-8") as fh:
-            for cp in chunk_proposals:
-                fh.write(json.dumps(cp, ensure_ascii=False) + "\n")
-        typer.echo(f"  kept {len(chunk_proposals)} per-chunk proposals in {raw_out}")
+        typer.echo(f"  kept {len(chunk_proposals)} per-chunk proposal(s) in {raw_out}")
 
-    all_proposals = list(chunk_proposals)
-    if raw_in and Path(raw_in).is_file():
-        previous = read_jsonl(raw_in)
-        if raw_out and Path(raw_out).resolve() == Path(raw_in).resolve():
-            previous = previous[: max(0, len(previous) - len(chunk_proposals))]
-        all_proposals = previous + chunk_proposals
+    # `previous` was read before the run, so no trimming games are needed when
+    # --raw-in and --raw-out are the same file.
+    all_proposals = previous + list(chunk_proposals)
+    if previous:
         typer.echo(f"  aggregating {len(previous)} previous + {len(chunk_proposals)} new")
+
+    # Which chunks the LLM never produced anything usable for. Recorded so the
+    # stage can leave those documents out of its ledger and retry them next run,
+    # instead of marking a document done that nothing was extracted from.
+    from ontorag import ontology_extractor_openrouter as _ose
+
+    if _ose.LAST_SKIPPED:
+        skip_path = Path(out).parent / "skipped_chunks.json"
+        existing = read_json(str(skip_path)) if skip_path.is_file() else {}
+        existing["extract-schema"] = sorted(set(existing.get("extract-schema", []))
+                                            | set(_ose.LAST_SKIPPED))
+        write_json(str(skip_path), existing)
+        typer.echo(f"  {len(_ose.LAST_SKIPPED)} chunk(s) produced nothing usable "
+                   f"-> recorded in {skip_path}")
 
     typer.echo(f"Aggregating {len(all_proposals)} chunk proposals...")
     aggregated = aggregate_chunk_proposals(all_proposals)
@@ -527,6 +591,17 @@ def cmd_extract_instances(
 
     # 1) LLM: per-chunk instance proposals
     proposals = extract_instance_chunk_proposals(chunks_list, card)
+
+    from ontorag import instance_extractor_openrouter as _ise
+
+    if _ise.LAST_SKIPPED:
+        skip_path = Path(out_ttl).parent / "skipped_chunks.json"
+        existing = read_json(str(skip_path)) if skip_path.is_file() else {}
+        existing["extract-instances"] = sorted(set(existing.get("extract-instances", []))
+                                               | set(_ise.LAST_SKIPPED))
+        write_json(str(skip_path), existing)
+        typer.echo(f"  {len(_ise.LAST_SKIPPED)} chunk(s) produced nothing usable "
+                   f"-> recorded in {skip_path}")
 
     # 2) JSON -> RDF graph
     ns = card.get("namespace") or "http://www.example.com/biz/"

@@ -15,6 +15,7 @@ from ontorag.card_slim import slim_card
 from ontorag.parallel import map_chunks, get_concurrency
 from ontorag.jsonparse import loads_lenient
 
+LAST_SKIPPED: list = []   # chunk ids dropped by the most recent run
 _log = get_logger("ontorag.ontology_extractor")
 
 
@@ -105,6 +106,8 @@ def extract_schema_chunk_proposals(
 
     _log.info("Schema extraction: %d chunks, model=%s, concurrency=%d", total, llm_config.model(), workers)
 
+    skipped_ids: List[str] = []   # list.append is atomic under the GIL
+
     def _work(i: int, ch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         chunk_id = ch.get("chunk_id", f"#{i}")
         _log.info("  [%d/%d] Processing chunk %s", i + 1, total, chunk_id)
@@ -124,18 +127,31 @@ def extract_schema_chunk_proposals(
                     # a single unparseable chunk shouldn't abort schema induction —
                     # the schema is aggregated across all chunks, so drop this one
                     _log.warning("  Skipping chunk %s after 3 failed attempts: %s", chunk_id, e)
+                    skipped_ids.append(chunk_id)
                     return None
                 time.sleep(1.5 * (attempt + 1))
 
-    def _on_done(i: int, data: Dict[str, Any]) -> None:
+    def _on_done(i: int, data: Optional[Dict[str, Any]]) -> None:
+        # A skipped chunk arrives here as None, because `map_chunks` reports every
+        # completion and only filters Nones out of its *return*. Callers reasonably
+        # assume a proposal and call `.get()` on it — the CLI's progress line did —
+        # so a single unparseable chunk raised AttributeError from inside the
+        # completion loop and killed a run that had already paid for every other
+        # chunk. There is nothing to report for a chunk that produced nothing.
+        if data is None:
+            return
         if on_chunk_done:
             chunk_id = chunks[i].get("chunk_id", f"#{i}")
             on_chunk_done(i, total, chunk_id, data)
 
     out = map_chunks(chunks, _work, on_done=_on_done, concurrency=workers)
-    skipped = total - len(out)
-    if skipped:
-        _log.warning("Schema extraction: %d/%d chunk(s) skipped (unparseable after retries)",
-                     skipped, total)
+    # Which chunks produced nothing, by name rather than by arithmetic: the caller
+    # needs the ids to keep those documents out of the pipeline's ledger, so a
+    # re-run retries them instead of recording a document nothing came from.
+    globals()["LAST_SKIPPED"] = list(skipped_ids)
+    if skipped_ids:
+        _log.warning("Schema extraction: %d/%d chunk(s) skipped (unparseable after "
+                     "retries): %s", len(skipped_ids), total,
+                     ", ".join(skipped_ids[:5]) + (" …" if len(skipped_ids) > 5 else ""))
     _log.info("Schema extraction complete: %d proposals from %d chunks", len(out), total)
     return out

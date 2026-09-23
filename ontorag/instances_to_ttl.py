@@ -7,6 +7,7 @@ from urllib.parse import quote as _quote
 from rdflib import Graph, Namespace, URIRef, BNode, Literal
 from rdflib.namespace import DCTERMS, RDF, RDFS, XSD
 
+from ontorag.iri import local_name
 from ontorag.sources import doc_slug, doc_title, file_sha256
 from ontorag.verbosity import get_logger
 
@@ -23,9 +24,11 @@ def _slug(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isalnum() or ch in ("_","-")).strip("_-")
 
 def _stable_instance_iri(ns: str, class_name: str, label: str, chunk_id: str) -> str:
+    # the hash is over the *raw* names, so identity does not change with the
+    # sanitiser; only the readable part of the path is made IRI-safe
     base = f"{class_name}|{label}|{chunk_id}"
     h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:10]
-    return f"{ns}{class_name}/{h}"
+    return f"{ns}{local_name(class_name)}/{h}"
 
 def instance_proposals_to_graph(
     chunk_dtos_by_id: Dict[str, Dict[str, Any]],
@@ -59,7 +62,7 @@ def instance_proposals_to_graph(
             iri = _stable_instance_iri(namespace, cls_name, label, chunk_id)
             s = URIRef(iri)
 
-            g.add((s, RDF.type, URIRef(f"{namespace}{cls_name}")))
+            g.add((s, RDF.type, URIRef(f"{namespace}{local_name(cls_name)}")))
             if label:
                 g.add((s, RDFS.label, Literal(label)))
             instance_count += 1
@@ -71,7 +74,7 @@ def instance_proposals_to_graph(
                 prop_name = (prop_name or "").strip()
                 if not prop_name or value is None or value == "":
                     continue
-                p = URIRef(f"{namespace}{prop_name}")
+                p = URIRef(f"{namespace}{local_name(prop_name)}")
                 g.add((s, p, Literal(str(value))))
 
             # relations (object properties): create target nodes (lightweight) if needed
@@ -85,11 +88,11 @@ def instance_proposals_to_graph(
                 tgt_iri = _stable_instance_iri(namespace, tgt_cls, tgt_label, chunk_id)
                 t = URIRef(tgt_iri)
 
-                g.add((t, RDF.type, URIRef(f"{namespace}{tgt_cls}")))
+                g.add((t, RDF.type, URIRef(f"{namespace}{local_name(tgt_cls)}")))
                 if tgt_label:
                     g.add((t, RDFS.label, Literal(tgt_label)))
 
-                g.add((s, URIRef(f"{namespace}{pred}"), t))
+                g.add((s, URIRef(f"{namespace}{local_name(pred)}"), t))
 
             # provenance: one orp:Mention per quoted passage
             mentions = [q for q in ((m.get("quote") or "").strip()

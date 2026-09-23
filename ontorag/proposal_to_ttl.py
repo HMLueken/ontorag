@@ -2,6 +2,8 @@
 from __future__ import annotations
 from typing import Dict, Optional
 from rdflib import Graph, Namespace, Literal, URIRef
+
+from ontorag.iri import local_name
 from rdflib.namespace import RDF, RDFS, OWL, XSD
 
 from ontorag.alignment_normalizer import normalize_alignment
@@ -104,15 +106,15 @@ def proposal_to_ttl(
         ns = base_class_ns.get(name)
         if ns:
             used_slugs.add(ns)
-            return URIRef(ns + name)
-        return URIRef(str(BIZ) + name)
+            return URIRef(ns + local_name(name))
+        return URIRef(str(BIZ) + local_name(name))
 
     def _prop_iri(name: str) -> URIRef:
         ns = base_prop_ns.get(name)
         if ns:
             used_slugs.add(ns)
-            return URIRef(ns + name)
-        return URIRef(str(BIZ) + name)
+            return URIRef(ns + local_name(name))
+        return URIRef(str(BIZ) + local_name(name))
 
     def _is_reused_baseline(item: dict, sub_key: str, name_map: Dict[str, str]) -> bool:
         """The item IS a baseline term (reuse) — reference it, don't redeclare."""

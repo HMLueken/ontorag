@@ -69,7 +69,20 @@ def _run(root: pathlib.Path, *args: str) -> None:
         # bad key, a model the server does not serve. Surfacing it as a traceback
         # is useless in an Actions log and worse in a desktop UI, so report which
         # step failed and stop.
-        step = next((a for a in args if not a.startswith("-")), "step")
+        # the first token that is neither a flag nor a flag's *value*: `--model
+        # google/gemini-2.5-flash-lite extract-instances …` used to report the
+        # failure as "stage failed at `google/gemini-2.5-flash-lite`"
+        step = "step"
+        skip_next = False
+        for a in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if a.startswith("-"):
+                skip_next = "=" not in a
+                continue
+            step = a
+            break
         raise SystemExit(
             f"stage failed at `{step}` (exit {e.returncode}). "
             f"Check the LLM endpoint and key for this dataset, then re-run."
@@ -164,6 +177,31 @@ def pending_chunks(root: pathlib.Path, step: str, full: bool = False):
     return fresh, sorted({c["document_id"] for c in fresh})
 
 
+SKIPPED_FILE = "ontology/skipped_chunks.json"
+
+
+def _skipped_docs(root: pathlib.Path, step: str, chunks: List[dict]) -> set:
+    """Documents the LLM could not process, so the ledger can leave them out.
+
+    Marking a document done when nothing was extracted from it is how a corpus
+    quietly ends up with holes: the document is in the chunk store, absent from the
+    graph, and no re-run will ever revisit it. A document is excluded whole even if
+    only one of its chunks failed — the ledger's unit is the document, so the next
+    run re-pays for its other chunks. Conservative, and the alternative is a hole.
+    """
+    p = root / SKIPPED_FILE
+    if not p.is_file():
+        return set()
+    try:
+        ids = set(json.loads(p.read_text(encoding="utf-8")).get(step, []))
+    except json.JSONDecodeError:
+        return set()
+    if not ids:
+        return set()
+    return {c["document_id"] for c in chunks
+            if c.get("chunk_id") in ids and c.get("document_id")}
+
+
 def _card_hash(root: pathlib.Path, card_rel: str) -> str:
     p = root / card_rel
     if not p.is_file():
@@ -196,13 +234,28 @@ def _ingest_and_chunk(root: pathlib.Path, m: dict) -> None:
     sources = sorted(glob.glob(str(root / "content" / "sources" / "*")))
     if not sources:
         raise SystemExit("no files in content/sources/")
-    for f in sources:
-        _engine(root, "ingest", os.path.relpath(f, root), "--engine", "builtin",
-                "--out", "content/dto", m=m)
+    # One invocation for the whole directory: ingest is content-addressed, so this
+    # is the same work, minus an interpreter start per document. On a 5,000-file
+    # corpus that is the difference between a minute and the best part of an hour.
+    _engine(root, "ingest", "content/sources", "--engine", "builtin",
+            "--out", "content/dto", m=m)
     chunk_files = sorted(glob.glob(str(root / "content" / "dto" / "chunks" / "*.jsonl")))
     with open(root / "content" / "chunks.jsonl", "w", encoding="utf-8") as out:
         for cf in chunk_files:
             out.write(pathlib.Path(cf).read_text(encoding="utf-8"))
+
+
+def _schema_source(m: dict) -> str:
+    """Which file the schema card and the TTL are built from.
+
+    `align-schema` maps induced terms onto baseline ontologies. With no baselines
+    it has nothing to map onto and correctly returns empty lists — but the card was
+    built from *that*, so a dataset configured without baselines lost its entire
+    induced schema: an empty `schema_card.proposed.json`, a 1-byte `schema.ttl`,
+    and instance extraction running against no model at all, inventing classes as
+    it went. Alignment enriches a proposal; it cannot be the only source of one.
+    """
+    return "ontology/alignment.json" if m.get("baselines") else "ontology/proposal.json"
 
 
 def propose(root: pathlib.Path, m: dict, full: bool = False) -> None:
@@ -239,12 +292,21 @@ def propose(root: pathlib.Path, m: dict, full: bool = False) -> None:
                 "--raw-in", "ontology/proposals.raw.jsonl",
                 "--raw-out", "ontology/proposals.raw.jsonl",
                 "--out", "ontology/proposal.json", llm=True, m=m)
-        _record_done(root, "extract-schema", doc_ids)
-    _engine(root, "align-schema", "--proposal", "ontology/proposal.json",
-            "--baseline", "ontology/schema_card.baseline.json",
-            "--out", "ontology/alignment.json", llm=True, m=m)
+        failed = _skipped_docs(root, "extract-schema", pending)
+        if failed:
+            print(f"extract-schema: {len(failed)} document(s) produced nothing usable — "
+                  f"left out of the ledger so the next run retries them", flush=True)
+        _record_done(root, "extract-schema", [d for d in doc_ids if d not in failed])
+    if m.get("baselines"):
+        _engine(root, "align-schema", "--proposal", "ontology/proposal.json",
+                "--baseline", "ontology/schema_card.baseline.json",
+                "--out", "ontology/alignment.json", llm=True, m=m)
+    else:
+        # nothing to align against: skip the call rather than spend on it and then
+        # build the card from its empty result
+        print("align-schema: no baselines configured — skipping", flush=True)
     _engine(root, "build-schema-card", "--previous", "ontology/schema_card.baseline.json",
-            "--proposal", "ontology/alignment.json",
+            "--proposal", _schema_source(m),
             "--original-proposal", "ontology/proposal.json",
             "--out", "ontology/schema_card.proposed.json", m=m)
     save_state(root, m, "proposed")
@@ -254,7 +316,7 @@ def extract(root: pathlib.Path, m: dict, full: bool = False) -> None:
     ns = m["dataset"]["base_iri"]
     prefix = _safe_prefix(m["dataset"]["slug"])
     _ingest_and_chunk(root, m)  # pick up any files added since propose
-    _engine(root, "export-schema-ttl", "--proposal", "ontology/alignment.json",
+    _engine(root, "export-schema-ttl", "--proposal", _schema_source(m),
             "--original-proposal", "ontology/proposal.json",
             "--namespace", ns, "--prefix", prefix,
             "--catalog", "ontology/catalog",
@@ -284,7 +346,11 @@ def extract(root: pathlib.Path, m: dict, full: bool = False) -> None:
         if not full:
             args.append("--merge")   # union with what is already in the graph
         _engine(root, *args, llm=True, m=m)
-        _record_done(root, "extract-instances", doc_ids)
+        failed = _skipped_docs(root, "extract-instances", pending)
+        if failed:
+            print(f"extract-instances: {len(failed)} document(s) produced nothing usable — "
+                  f"left out of the ledger so the next run retries them", flush=True)
+        _record_done(root, "extract-instances", [d for d in doc_ids if d not in failed])
         st = _load_state(root)
         st.setdefault("extract-instances", {})["card"] = _card_hash(root, card)
         (root / STATE_FILE).write_text(json.dumps(st, indent=2) + "\n", encoding="utf-8")

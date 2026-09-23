@@ -127,3 +127,28 @@ def test_version_flag():
         r = ontorag(flag)
         assert r.returncode == 0, f"{flag} failed: {r.stderr}"
         assert r.stdout.startswith("ontorag "), r.stdout
+
+
+def test_ingest_takes_a_directory(tmp_path):
+    """A corpus is a directory. Looping the command per file costs an interpreter
+    start each -- ~48 minutes of overhead on 5,000 documents, which is what the
+    pipeline used to do."""
+    from typer.testing import CliRunner
+
+    from ontorag.cli import app
+
+    src = tmp_path / "sources"
+    src.mkdir()
+    for i in range(3):
+        (src / f"doc_{i}.md").write_text(f"# Title {i}\n\nBody of document {i}.\n")
+    (src / ".hidden.md").write_text("ignored\n")
+
+    out = tmp_path / "dto"
+    r = CliRunner().invoke(app, ["ingest", str(src), "--out", str(out)])
+    assert r.exit_code == 0, r.output
+    assert "3 document(s)" in r.output
+    assert len(list((out / "documents").glob("*.json"))) == 3
+
+    # content-addressed: a second pass re-ingests nothing
+    r2 = CliRunner().invoke(app, ["ingest", str(src), "--out", str(out)])
+    assert "3 already ingested" in r2.output, r2.output

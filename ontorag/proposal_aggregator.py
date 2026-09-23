@@ -9,6 +9,41 @@ _log = get_logger("ontorag.proposal_aggregator")
 def _key(name: str) -> str:
     return (name or "").strip().lower()
 
+
+# Cap on the expansion below: a property proposed with many domains and many
+# ranges is a cross product, and a model having a bad day can make that large.
+_MAX_EXPANSION = 5
+
+
+def _names(value) -> List[str]:
+    """The name(s) a proposal field carries, whatever shape the model used.
+
+    Nothing binds a model to the schema it was asked for, and at scale it will not
+    stay in it: over 4,051 real proposals from one 5,000-abstract corpus, 5,175
+    `domain`/`name`/`range` fields came back as **lists** rather than strings —
+    `{"name": "treats", "domain": ["Drug", "Therapy"], "range": "Disease"}`. The
+    aggregator called `.strip()` on that and the whole run died at the merge step,
+    with every LLM call already paid for.
+
+    A list is a claim about several domains, so it expands into several properties
+    rather than being dropped — the information is real, only the shape is wrong.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        return [v] if v else []
+    if isinstance(value, dict):                      # {"name": ...} shows up too
+        return _names(value.get("name"))
+    if isinstance(value, (list, tuple)):
+        out: List[str] = []
+        for item in value:
+            for n in _names(item):
+                if n not in out:
+                    out.append(n)
+        return out[:_MAX_EXPANSION]
+    return _names(str(value))
+
 def _as_list(x):
     if x is None:
         return []
@@ -79,6 +114,12 @@ def aggregate_chunk_proposals(chunk_props: List[Dict[str, Any]]) -> Dict[str, An
         return existing
 
     for cp in chunk_props:
+        if not isinstance(cp, dict):
+            # a `null` line in a raw-proposal store, written by an older run that
+            # kept its failures: skip rather than die, the way this file already
+            # treats garbage inside a proposal
+            _log.warning("skipping a non-dict chunk proposal (%r)", type(cp).__name__)
+            continue
         cp_chunk_id = str(cp.get("chunk_id") or "")
 
         warnings.extend(_as_list(cp.get("warnings", [])))
@@ -118,57 +159,61 @@ def aggregate_chunk_proposals(chunk_props: List[Dict[str, Any]]) -> Dict[str, An
         for p in _as_list(add.get("datatype_properties", [])):
             if not isinstance(p, dict):
                 continue
-            dom, name, rng = p.get("domain"), p.get("name"), p.get("range")
-            if not dom or not name or not rng:
-                continue
-            k = (_key(dom), _key(name), _key(rng))
-            if k not in dprops:
-                dprops[k] = {
-                    "name": name,
-                    "domain": dom,
-                    "range": rng,
-                    "description": p.get("description", "") or "",
-                    "evidence": _normalize_evidence(p.get("evidence", []), default_chunk_id=cp_chunk_id)
-                }
-            else:
-                old_desc = dprops[k].get("description", "") or ""
-                new_desc = p.get("description", "") or ""
-                if new_desc and (not old_desc or len(new_desc) > len(old_desc)):
-                    dprops[k]["description"] = new_desc
+            triples = [(d, n, r)
+                       for d in _names(p.get("domain"))
+                       for n in _names(p.get("name"))
+                       for r in _names(p.get("range"))]
+            for dom, name, rng in triples:
+                k = (_key(dom), _key(name), _key(rng))
+                if k not in dprops:
+                    dprops[k] = {
+                        "name": name,
+                        "domain": dom,
+                        "range": rng,
+                        "description": p.get("description", "") or "",
+                        "evidence": _normalize_evidence(p.get("evidence", []), default_chunk_id=cp_chunk_id)
+                    }
+                else:
+                    old_desc = dprops[k].get("description", "") or ""
+                    new_desc = p.get("description", "") or ""
+                    if new_desc and (not old_desc or len(new_desc) > len(old_desc)):
+                        dprops[k]["description"] = new_desc
 
-                dprops[k]["evidence"] = merge_evidence(
-                    dprops[k].get("evidence", []),
-                    p.get("evidence", []),
-                    default_chunk_id=cp_chunk_id
-                )
+                    dprops[k]["evidence"] = merge_evidence(
+                        dprops[k].get("evidence", []),
+                        p.get("evidence", []),
+                        default_chunk_id=cp_chunk_id
+                    )
 
         # ---- object properties ----
         for p in _as_list(add.get("object_properties", [])):
             if not isinstance(p, dict):
                 continue
-            dom, name, rng = p.get("domain"), p.get("name"), p.get("range")
-            if not dom or not name or not rng:
-                continue
-            k = (_key(dom), _key(name), _key(rng))
-            if k not in oprops:
-                oprops[k] = {
-                    "name": name,
-                    "domain": dom,
-                    "range": rng,
-                    "description": p.get("description", "") or "",
-                    "evidence": _normalize_evidence(p.get("evidence", []), default_chunk_id=cp_chunk_id)
-                }
-            else:
-                old_desc = oprops[k].get("description", "") or ""
-                new_desc = p.get("description", "") or ""
-                if new_desc and (not old_desc or len(new_desc) > len(old_desc)):
-                    oprops[k]["description"] = new_desc
+            triples = [(d, n, r)
+                       for d in _names(p.get("domain"))
+                       for n in _names(p.get("name"))
+                       for r in _names(p.get("range"))]
+            for dom, name, rng in triples:
+                k = (_key(dom), _key(name), _key(rng))
+                if k not in oprops:
+                    oprops[k] = {
+                        "name": name,
+                        "domain": dom,
+                        "range": rng,
+                        "description": p.get("description", "") or "",
+                        "evidence": _normalize_evidence(p.get("evidence", []), default_chunk_id=cp_chunk_id)
+                    }
+                else:
+                    old_desc = oprops[k].get("description", "") or ""
+                    new_desc = p.get("description", "") or ""
+                    if new_desc and (not old_desc or len(new_desc) > len(old_desc)):
+                        oprops[k]["description"] = new_desc
 
-                oprops[k]["evidence"] = merge_evidence(
-                    oprops[k].get("evidence", []),
-                    p.get("evidence", []),
-                    default_chunk_id=cp_chunk_id
-                )
+                    oprops[k]["evidence"] = merge_evidence(
+                        oprops[k].get("evidence", []),
+                        p.get("evidence", []),
+                        default_chunk_id=cp_chunk_id
+                    )
 
         # ---- events ----
         for ev in _as_list(add.get("events", [])):

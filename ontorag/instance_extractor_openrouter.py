@@ -11,6 +11,7 @@ from ontorag.card_slim import slim_card
 from ontorag.parallel import map_chunks, get_concurrency
 from ontorag.jsonparse import loads_lenient
 
+LAST_SKIPPED: list = []   # chunk ids dropped by the most recent run
 _log = get_logger("ontorag.instance_extractor")
 
 
@@ -134,6 +135,7 @@ def extract_instance_chunk_proposals(
     max_retries: int = 3,
     concurrency: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    skipped_ids: List[str] = []   # list.append is atomic under the GIL
     system = "You extract structured instances grounded in a provided ontology. Output JSON only."
     total = len(chunks)
     workers = concurrency if concurrency is not None else get_concurrency()
@@ -155,13 +157,16 @@ def extract_instance_chunk_proposals(
                     # one unparseable chunk must not abort a multi-thousand-chunk run
                     _log.warning("  Skipping chunk %s after %d failed attempts: %s",
                                  chunk_id, max_retries, e)
+                    skipped_ids.append(chunk_id)
                     return None
                 time.sleep(1.5 * (attempt + 1))
 
     out = map_chunks(chunks, _work, concurrency=workers)
-    skipped = total - len(out)
-    if skipped:
-        _log.warning("Instance extraction: %d/%d chunk(s) skipped (unparseable after retries)",
-                     skipped, total)
+    # Named, not counted: the pipeline needs the ids to retry those documents.
+    globals()["LAST_SKIPPED"] = list(skipped_ids)
+    if skipped_ids:
+        _log.warning("Instance extraction: %d/%d chunk(s) skipped (unparseable after "
+                     "retries): %s", len(skipped_ids), total,
+                     ", ".join(skipped_ids[:5]) + (" …" if len(skipped_ids) > 5 else ""))
     _log.info("Instance extraction complete: %d proposals from %d chunks", len(out), total)
     return out
