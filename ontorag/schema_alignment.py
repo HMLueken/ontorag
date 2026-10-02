@@ -15,11 +15,8 @@ import json
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-import requests
-
+from ontorag.llm_chat import _chat_json
 from ontorag.verbosity import get_logger
-from ontorag import llm_config
-from ontorag.jsonparse import loads_lenient
 
 _log = get_logger("ontorag.schema_alignment")
 
@@ -28,40 +25,6 @@ AlignProgressCallback = Callable[..., None]
 
 
 # ── LLM helper ────────────────────────────────────────────────────────
-
-def _chat_json(system: str, user: str) -> Dict[str, Any]:
-    key = llm_config.api_key()
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set (set it in the environment or pass --api-key)")
-
-    url = f"{llm_config.base_url()}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": llm_config.site_url(),
-        "X-Title": llm_config.app_name(),
-    }
-    payload = {
-        "model": llm_config.model(),
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.1,
-    }
-
-    _log.debug("API request: model=%s prompt_len=%d", llm_config.model(), len(user))
-    _log.debug("API prompt:\n%s", user)
-    r = requests.post(url, headers=headers, json=payload, timeout=120)
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"].get("content")
-    if not content:  # some models (e.g. reasoning ones) can return null content
-        raise RuntimeError("model returned empty/null content")
-    _log.debug("API response: %d chars", len(content))
-    _log.debug("API raw response:\n%s", content)
-    # tolerant parse: recovers fenced / prose-wrapped / trailing-junk payloads
-    return loads_lenient(content)
-
 
 def _normalize_alignments(raw: Any) -> Dict[str, Any]:
     """Coerce an LLM alignment response into ``{"alignments": [dict, ...]}``.

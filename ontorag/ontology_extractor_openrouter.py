@@ -7,13 +7,11 @@ from typing import Callable, List, Dict, Any, Optional
 ChunkProgressCallback = Callable[[int, int, str, Dict[str, Any]], None]
 """(chunk_index, total_chunks, chunk_id, proposal_or_error) → None"""
 
-import requests
-
+from ontorag.llm_chat import _chat_json
 from ontorag.verbosity import get_logger
 from ontorag import llm_config
 from ontorag.card_slim import slim_card
 from ontorag.parallel import map_chunks, get_concurrency
-from ontorag.jsonparse import loads_lenient
 
 LAST_SKIPPED: list = []   # chunk ids dropped by the most recent run
 _log = get_logger("ontorag.ontology_extractor")
@@ -63,36 +61,6 @@ Rules:
 - Output JSON only. No extra text.
 """.strip()
 
-def _chat_json(system: str, user: str) -> Dict[str, Any]:
-    key = llm_config.api_key()
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set (set it in the environment or pass --api-key)")
-
-    url = f"{llm_config.base_url()}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": llm_config.site_url(),
-        "X-Title": llm_config.app_name(),
-    }
-    payload = {
-        "model": llm_config.model(),
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.2,
-    }
-
-    _log.debug("API request: model=%s prompt_len=%d", llm_config.model(), len(user))
-    r = requests.post(url, headers=headers, json=payload, timeout=180)
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"].get("content")
-    if not content:  # some models (e.g. reasoning ones) can return null content
-        raise RuntimeError("model returned empty/null content")
-    _log.debug("API response: %d chars", len(content))
-    # tolerant parse: recovers fenced / prose-wrapped / trailing-junk payloads
-    return loads_lenient(content)
 
 def extract_schema_chunk_proposals(
     chunks: List[Dict[str, Any]],
