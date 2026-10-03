@@ -98,10 +98,10 @@ def instance_proposals_to_graph(
             mentions = [q for q in ((m.get("quote") or "").strip()
                                     for m in (inst.get("mentions") or [])) if q]
             if mentions:
-                source, file_, chunk = _describe_origin(g, namespace, chunk, chunk_id, described)
+                source, file_, chunk_uri = _describe_origin(g, namespace, chunk, chunk_id, described)
                 g.add((s, ORP.attestedIn, source))
                 for quote in mentions:
-                    _add_mention(g, namespace, s, quote, file_, chunk, prov)
+                    _add_mention(g, namespace, s, quote, file_, chunk_uri, prov)
 
     _log.info("Instance graph built: %d instances, %d triples", instance_count, len(g))
     return g
