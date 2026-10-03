@@ -28,8 +28,10 @@ def _chat_json(system: str, user: str) -> Dict[str, Any]:
     }
 
     _log.debug("API request: model=%s prompt_len=%d", llm_config.model(), len(user))
+    tmp = Path("tmp")
+    tmp.mkdir(exist_ok=True)
     s = CachedSession(
-        Path("responses.sqlite"),
+        tmp.joinpath("http_responses.sqlite"),
         expire_after=NEVER_EXPIRE,
         allowable_methods=("GET", "POST")
     )
