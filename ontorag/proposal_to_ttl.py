@@ -103,17 +103,9 @@ def proposal_to_ttl(
     used_slugs = set()
 
     def _class_iri(name: str) -> URIRef:
-        ns = base_class_ns.get(name)
-        if ns:
-            used_slugs.add(ns)
-            return URIRef(ns + local_name(name))
         return URIRef(str(BIZ) + local_name(name))
 
     def _prop_iri(name: str) -> URIRef:
-        ns = base_prop_ns.get(name)
-        if ns:
-            used_slugs.add(ns)
-            return URIRef(ns + local_name(name))
         return URIRef(str(BIZ) + local_name(name))
 
     def _is_reused_baseline(item: dict, sub_key: str, name_map: Dict[str, str]) -> bool:

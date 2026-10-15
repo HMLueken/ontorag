@@ -5,3 +5,4 @@ data/*
 !data/ontologies/
 !data/ontologies/catalog.json
 *.egg-info/*
+.venv
