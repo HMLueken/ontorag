@@ -10,9 +10,12 @@ from openai import OpenAI
 _log = get_logger("ontorag.schema_alignment")
 
 def _chat_json(system: str, user: str) -> Dict[str, Any]:
-    path = Path("tmp/llm_response_cache.json")
     Path("tmp").mkdir(exist_ok=True)
-    cache = json.loads(path.read_text())
+    path = Path("tmp/llm_response_cache.json")
+    if path.exists():
+        cache = json.loads(path.read_text())
+    else:
+        cache = dict()
     url = llm_config.base_url()
     cache_key = f"{system}\n{user}"
     if cache_key in cache:
@@ -31,6 +34,10 @@ def _chat_json(system: str, user: str) -> Dict[str, Any]:
                 ]
             )
             resp = unicodedata.normalize("NFKD", response.output_text)
+        if path.exists():
+            cache = json.loads(path.read_text())
+        else:
+            cache = dict()
         cache[cache_key] = resp
         path.write_text(json.dumps(cache))
     if not resp:  # some models (e.g. reasoning ones) can return null content
