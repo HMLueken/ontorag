@@ -31,7 +31,8 @@ def _chat_json(system: str, user: str) -> Dict[str, Any]:
                 input=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user}
-                ]
+                ],
+                reasoning={"effort": "medium"}
             )
             resp = unicodedata.normalize("NFKD", response.output_text)
         if path.exists():
