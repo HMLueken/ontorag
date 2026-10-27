@@ -9,17 +9,24 @@ from openai import OpenAI
 
 _log = get_logger("ontorag.schema_alignment")
 
+
+def get_cache_key(system: str, user: str) -> str:
+    return f"system: {system}\nuser:{user}"
+
+
+CACHE: dict[str, str]
+
+
 def _chat_json(system: str, user: str) -> Dict[str, Any]:
+    global CACHE
     Path("tmp").mkdir(exist_ok=True)
     path = Path("tmp/llm_response_cache.json")
-    if path.exists():
-        cache = json.loads(path.read_text())
-    else:
-        cache = dict()
+    if not CACHE and path.exists():
+        CACHE = json.loads(path.read_text())
     url = llm_config.base_url()
-    cache_key = f"{system}\n{user}"
-    if cache_key in cache:
-        resp = cache[cache_key]
+    cache_key = get_cache_key(user, system)
+    if cache_key in CACHE:
+        resp = CACHE[cache_key]
     else:
         _log.debug("API request: model=%s prompt_len=%d", llm_config.model(), len(user))
         with OpenAI(
@@ -35,12 +42,8 @@ def _chat_json(system: str, user: str) -> Dict[str, Any]:
                 reasoning={"effort": "medium"}
             )
             resp = unicodedata.normalize("NFKD", response.output_text)
-        if path.exists():
-            cache = json.loads(path.read_text())
-        else:
-            cache = dict()
-        cache[cache_key] = resp
-        path.write_text(json.dumps(cache))
+        CACHE[cache_key] = resp
+        path.write_text(json.dumps(CACHE))
     if not resp:  # some models (e.g. reasoning ones) can return null content
         raise RuntimeError("model returned empty/null content")
     _log.debug("API response: %d chars", len(resp))
