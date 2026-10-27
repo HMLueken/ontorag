@@ -41,7 +41,8 @@ You receive:
 - A SCHEMA CARD (classes + properties + relations)
 
 Task:
-Extract instance candidates mentioned in the chunk and express them as STRICT JSON.
+Extract information mentioned in the chunk and express it as STRICT JSON.
+To do so, identify entity instance candidates to becomae subjects in RDF triples and assign a class to them.
 Use ONLY class/property/relation names that exist in the schema card.
 If the chunk mentions a concept not representable with the current schema, add it to "warnings" (do not invent schema).
 
@@ -84,7 +85,7 @@ OUTPUT (STRICT JSON):
 }}
 
 Rules:
-- Do not invent entities. Only extract what is clearly present in the chunk.
+- Try to extract all relevant information focused on in the chunk.
 - Use the MOST SPECIFIC class available in the schema card.
   Do not assign a broad parent class when a more precise subclass applies.
 - If an entity could belong to multiple classes (e.g. both a generic and a
