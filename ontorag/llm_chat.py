@@ -40,7 +40,8 @@ def _chat_json(system: str, user: str) -> Dict[str, Any]:
             )
             resp = unicodedata.normalize("NFKD", response.output_text)
         cache[cache_key] = resp
-        path.write_text(json.dumps(cache))
+        with path.open('w') as f:
+            json.dump(cache, f, indent=4)
     if not resp:  # some models (e.g. reasoning ones) can return null content
         raise RuntimeError("model returned empty/null content")
     _log.debug("API response: %d chars", len(resp))
