@@ -14,12 +14,23 @@ def get_cache_key(system: str, user: str) -> str:
     return f"system: {system}\nuser:{user}"
 
 
+def save_cache(path: Path, cache: dict[str, str]) -> None:
+    path.parent.mkdir(exist_ok=True)
+    with path.open('w') as f:
+        json.dump(cache, f, indent=4)
+
+
+def read_cache(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    with path.open('r') as f:
+        cache = json.load(f)
+    return cache
+
+
 def _chat_json(system: str, user: str) -> Dict[str, Any]:
-    cache = {}
-    Path("tmp").mkdir(exist_ok=True)
     path = Path("tmp/llm_response_cache.json")
-    if not cache and path.exists():
-        cache = json.loads(path.read_text())
+    cache = read_cache(path)
     url = llm_config.base_url()
     cache_key = get_cache_key(user, system)
     if cache_key in cache:
@@ -40,8 +51,7 @@ def _chat_json(system: str, user: str) -> Dict[str, Any]:
             )
             resp = unicodedata.normalize("NFKD", response.output_text)
         cache[cache_key] = resp
-        with path.open('w') as f:
-            json.dump(cache, f, indent=4)
+        save_cache(path, cache)
     if not resp:  # some models (e.g. reasoning ones) can return null content
         raise RuntimeError("model returned empty/null content")
     _log.debug("API response: %d chars", len(resp))
