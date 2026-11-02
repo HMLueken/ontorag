@@ -49,6 +49,9 @@ Rules:
 - Do not invent facts not grounded in the chunk.
 - Use precise, domain-specific class names that capture the concept accurately.
   Do NOT use overly broad names that collapse distinct concepts into one class.
+- Do not add your own judgement about the correctness of stated information into class
+  and property names. The vocabulary needs to be able to represent any claims made
+  in the article factually and from the authors perspective.
 - Propose a new class whenever a concept has meaningfully different attributes,
   roles, or domain significance from existing classes — even if they share a
   parent concept. Err on the side of more classes, not fewer.

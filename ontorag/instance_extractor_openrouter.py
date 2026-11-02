@@ -85,7 +85,9 @@ OUTPUT (STRICT JSON):
 }}
 
 Rules:
-- Try to extract all relevant information focused on in the chunk.
+- Try to extract all relevant information the chunk focuses on.
+- Do not add your own judgement about the correctness of stated information.
+  Represent any claims made in the chunk factually and from the authors perspective.
 - Use the MOST SPECIFIC class available in the schema card.
   Do not assign a broad parent class when a more precise subclass applies.
 - If an entity could belong to multiple classes (e.g. both a generic and a
