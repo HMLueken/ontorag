@@ -141,6 +141,9 @@ Rules:
   the induced class has any meaningful distinction from the baseline class.
 - Use "reuse" only when the concepts are truly equivalent and interchangeable.
   When in doubt, use "extend" (if a parent exists) or "new".
+- The vocabulary must be able to represent any claims made using the original classes
+  from the viewpoint of their original author. Do not generalize classes, because they
+  might be used to express information in a non factual way.
 - Output JSON only. No extra text.
 """
 
@@ -184,6 +187,9 @@ Rules:
   the induced property has any meaningful distinction from the baseline.
 - Use "reuse" only when the properties are truly interchangeable.
   When in doubt, use "extend" (if a parent exists) or "new".
+- The vocabulary must be able to represent any claims made using the original properties
+  from the viewpoint of their original author. Do not generalize properties, because they
+  might be used to express information in a non factual way.
 - Output JSON only. No extra text.
 """
 
