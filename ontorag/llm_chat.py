@@ -29,7 +29,7 @@ def read_cache(path: Path) -> dict[str, str]:
 
 
 def _chat_json(system: str, user: str) -> Dict[str, Any]:
-    path = Path("tmp/llm_response_cache.json")
+    path = Path("tmp/llm_response_cache.ontorag.json")
     cache = read_cache(path)
     url = llm_config.base_url()
     cache_key = get_cache_key(user, system)
